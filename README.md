@@ -44,7 +44,7 @@ and user confirmation.
 - **Python 3.10 or higher** (the server uses `str | None` syntax)
 - **navi CLI** installed and on `PATH` (`pip install navi-hostio` — see
   [packetchaos/navi](https://github.com/packetchaos/navi))
-- **API keys set in navi** before starting the server (`navi keys --a <ACCESS_KEY> --s <SECRET_KEY>`)
+- **API keys set in navi** before starting the server (`navi config keys --a <ACCESS_KEY> --s <SECRET_KEY>`)
 
 ### Install from source
 
@@ -200,7 +200,7 @@ Some navi commands are intentionally NOT wrapped as MCP tools:
   can pull hundreds of GB, take hours). Operators run this at their terminal.
 - **Out of scope** — `navi action deploy`, `navi action automate`, `navi action
   plan`, `navi enrich attribute`, `navi enrich migrate`, `navi enrich tagrule`,
-  `navi keys`.
+  `navi config keys`.
 
 See `navi-claude-skills/navi-mcp/SKILL.md` for the full rationale.
 
@@ -224,7 +224,7 @@ See `navi-claude-skills/navi-mcp/SKILL.md` for the full rationale.
 the server starts:
 
 ```bash
-navi keys --a <ACCESS_KEY> --s <SECRET_KEY>
+navi config keys --a <ACCESS_KEY> --s <SECRET_KEY>
 python -m navi_mcp
 ```
 
@@ -246,13 +246,13 @@ skill. Common ones:
   `--threads` on full sync
 - **Commands return empty results** → navi.db empty (needs
   `navi config update full`) or keys not set
-- **Schema errors after upgrade** → `rm navi.db && navi keys ... && navi config update full`
+- **Schema errors after upgrade** → `rm navi.db && navi config keys ... && navi config update full`
 
 If the server fails to start, check:
 
 - Python version is 3.10+
 - `navi` is on `PATH` or `NAVI_BIN` points at the binary
-- `navi keys` has been set (the server itself doesn't check, but nothing works
+- `navi config keys` has been set (the server itself doesn't check, but nothing works
   without them)
 
 Logs go to stderr. Start the server from a terminal to see them, or redirect
