@@ -104,8 +104,8 @@ docs for your platform):
 }
 ```
 
-Restart Claude Desktop. The `navi_workflow` prompt appears as a slash command;
-type `/navi_workflow` in a chat to load the navi router skill and start working
+Restart Claude Desktop. The `navi` prompt appears as a slash command;
+type `/navi` in a chat to load the navi router skill and start working
 against your Tenable tenant.
 
 To enable writes (tag creation, ACR adjustment, scan control, deletion), change
@@ -151,7 +151,7 @@ specific client and hit issues, please file them.
 
 ### Prompts
 
-- **`navi_workflow [task]`** — injects the navi router skill and frames the
+- **`navi [task]`** — injects the navi router skill and frames the
   user's task. Claude pulls in additional domain skills on demand via the
   `navi://skill/{name}` resource.
 
