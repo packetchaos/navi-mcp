@@ -41,10 +41,13 @@ and user confirmation.
 
 ### Prerequisites
 
-- **Python 3.10 or higher** (the server uses `str | None` syntax)
+- **Python 3.12 or higher.** navi itself requires 3.12+; the MCP server only
+  needs 3.10+ (it uses `str | None` syntax), but since both run under the same
+  interpreter, 3.12+ is the practical floor.
 - **navi CLI** installed and on `PATH` (`pip install navi-hostio` — see
-  [packetchaos/navi](https://github.com/packetchaos/navi))
-- **API keys set in navi** before starting the server (`navi config keys --a <ACCESS_KEY> --s <SECRET_KEY>`)
+  [packetchaos/navi](https://github.com/packetchaos/navi)).
+- **API keys set in navi** before starting the server
+  (`navi config keys --a <ACCESS_KEY> --s <SECRET_KEY>`).
 
 ### Install from source
 
@@ -53,6 +56,10 @@ git clone https://github.com/packetchaos/navi-mcp
 cd navi-mcp
 pip install -e .
 ```
+
+This makes the package importable as `navi_mcp` (so `python -m navi_mcp` works).
+You can also run the server file directly without installing — see
+[Running it](#running-it).
 
 ### Skill set (recommended)
 
@@ -75,27 +82,40 @@ Executive Dashboard workflow) that makes Claude's output significantly sharper.
 ### stdio (for Claude Desktop, Claude Code)
 
 ```bash
-python -m navi_mcp
+python -m navi_mcp                      # if installed as a package
+python /path/to/navi-mcp/server.py      # or run the file directly
 ```
+
+A stdio server prints a startup line to **stderr** and then waits silently for
+a client to connect — that's normal, not a hang.
 
 ### Streamable HTTP (for remote MCP clients)
 
 ```bash
-python -m navi_mcp --http    # serves on :8000
+python -m navi_mcp --http               # serves on :8000
 ```
 
 ### Claude Desktop config
 
-Add to `claude_desktop_config.json` (location varies by OS — check Anthropic's
-docs for your platform):
+Open **Settings → Developer → Edit Config** and add a `navi` server. Two
+things trip people up, so the example below addresses both:
+
+- **Use an absolute path to the Python interpreter**, not a bare `"python"`.
+  Claude Desktop launches the server with a minimal environment, so `"python"`
+  often resolves to the wrong interpreter (or none). Use the interpreter that
+  has both `mcp` and `navi` installed.
+- **Point at the server explicitly** — either the absolute path to `server.py`,
+  or `-m navi_mcp` if you `pip install -e .`'d it into that same interpreter.
 
 ```json
 {
   "mcpServers": {
     "navi": {
-      "command": "python",
-      "args": ["-m", "navi_mcp"],
+      "command": "/absolute/path/to/python3",
+      "args": ["/absolute/path/to/navi-mcp/server.py"],
       "env": {
+        "NAVI_BIN": "/absolute/path/to/navi",
+        "NAVI_WORKDIR": "/absolute/path/to/folder-with-navi.db",
         "NAVI_SKILL_DIR": "/absolute/path/to/navi-claude-skills",
         "NAVI_MCP_ALLOW_WRITES": "0"
       }
@@ -104,12 +124,17 @@ docs for your platform):
 }
 ```
 
-Restart Claude Desktop. The `navi` prompt appears as a slash command;
-type `/navi` in a chat to load the navi router skill and start working
-against your Tenable tenant.
+Not sure of your paths? Run `tools/navi_mcp_config.py` (included in this repo)
+with the interpreter you intend to use — it discovers `server.py`, `navi.db`,
+the `navi` binary, and the skills directory, and prints this exact block.
+
+Save, then **fully quit and reopen Claude Desktop** — config is read only at
+launch. The `navi_workflow` prompt then appears as a slash command: type
+`/navi_workflow` in a chat to load the navi router skill and start working
+against your Tenant.
 
 To enable writes (tag creation, ACR adjustment, scan control, deletion), change
-`"NAVI_MCP_ALLOW_WRITES": "0"` to `"1"` and restart the server. See
+`"NAVI_MCP_ALLOW_WRITES": "0"` to `"1"` and restart. See
 [Write-gate design](#write-gate-design) below.
 
 ### Other MCP clients
@@ -127,33 +152,34 @@ specific client and hit issues, please file them.
 | Tool | Purpose | Writes? |
 |---|---|---|
 | `navi_config_update` | Targeted database refreshes (vulns, assets, agents, etc.) | No |
-| `navi_config` | Configure SLA, software table, FedRAMP URL | URL only |
+| `navi_config` | Configure SLA, software table, certificate table, FedRAMP URL | URL only |
 | `navi_explore_query` | SQL against navi.db — reads free, writes need `confirm=True` | Local only |
-| `navi_explore_data` | 17 canned query subcommands (cve, exploit, xrefs, etc.) | No |
-| `navi_explore_info` | 26 live platform lookups (scanners, scans, users, policies...) | No |
+| `navi_explore_data` | Canned query subcommands (cve, exploit, xrefs, plugin, port, db-info, etc.) | No |
+| `navi_explore_info` | Live platform lookups (scanners, scans, users, policies, tags...) | No |
 | `navi_enrich_tag` | Tagging with 20+ selectors | **Yes** |
 | `navi_enrich_acr` | ACR adjustment with Change Reasons (set/inc/dec, business/compliance/mitigation/development) | **Yes** |
 | `navi_enrich_add` | Import assets from CMDB / AWS / external sources | **Yes** |
 | `navi_export` | 15 CSV export subcommands (bytag includes ACR+AES) | No |
-| `navi_scan` | Create/start/stop/evaluate scans | Create/start/stop |
+| `navi_scan` | Scan control (create/start/stop/pause/resume), read views (status/details/history/hosts/latest), and `evaluate` performance analysis | Create/start/stop/pause/resume |
 | `navi_was` | Web App Scanning (DAST) — configs, scans, details, stats, export, upload | Scan/start/upload |
-| `navi_action_delete` | Delete tags, users, scans, assets, agents, exclusions | **Yes** (destructive) |
+| `navi_action_delete` | Delete Tenable objects: tags, by-tag, assets, scans, users, target groups, user groups, ACR tone | **Yes** (destructive) |
 | `navi_action_rotate` | Rotate a user's API keys | **Yes** |
-| `navi_action_cancel` | Cancel a running export | **Yes** |
+| `navi_action_cancel` | Cancel a running export (by `uuid`) | **Yes** |
 | `navi_action_encrypt` | Encrypt a local file | Local file only |
 | `navi_action_decrypt` | Decrypt a local file | Local file only |
 
 ### Resources
 
 - **`navi://schema/{table}`** — column definitions for any navi.db table
-- **`navi://workdir`** — workdir path, navi.db status, write-gate state, skill directory
-- **`navi://skill/{name}`** — load a [navi-claude-skills](https://github.com/packetchaos/navi-claude-skills) domain skill on demand (`mcp`, `core`, `troubleshooting`, `enrich`, `acr`, `explore`, `export`, `scan`, `action`, `was`, `router`)
+- **`navi://workdir`** — workdir path, navi.db status + freshness, write-gate state, skill directory
+- **`navi://skill/{name}`** — load a [navi-claude-skills](https://github.com/packetchaos/navi-claude-skills) domain skill on demand (`router`, `core`, `mcp`, `troubleshooting`, `enrich`, `acr`, `explore`, `export`, `scan`, `action`, `was`)
+- **`navi://skill/{name}/{ref}`** — load a skill's bundled reference file (e.g. `navi://skill/core/schema`, `navi://skill/enrich/selectors`)
 
 ### Prompts
 
-- **`navi [task]`** — injects the navi router skill and frames the
-  user's task. Claude pulls in additional domain skills on demand via the
-  `navi://skill/{name}` resource.
+- **`navi_workflow [task]`** — surfaces as the `/navi_workflow` slash command.
+  Injects the navi router skill and frames the user's task; Claude pulls in
+  additional domain skills on demand via the `navi://skill/{name}` resource.
 
 ---
 
@@ -196,8 +222,11 @@ Some navi commands are intentionally NOT wrapped as MCP tools:
 - **Hazardous to automate** — `navi action push` (remote shell execution),
   `navi action mail` (email delivery). Kept CLI-only. Skills explain them to
   users as CLI steps when a workflow needs them.
-- **Too heavy for a tool call** — `navi config update full` (first-run syncs
-  can pull hundreds of GB, take hours). Operators run this at their terminal.
+- **Too heavy / too slow for a tool call** — `navi config update full`
+  (first-run syncs can pull hundreds of GB and run for hours). Operators run
+  this at their terminal. Note that even *targeted* refreshes
+  (`navi_config_update(kind="vulns")`) can exceed an MCP client's call timeout
+  on a large tenant — see [Troubleshooting](#troubleshooting).
 - **Out of scope** — `navi action deploy`, `navi action automate`, `navi action
   plan`, `navi enrich attribute`, `navi enrich migrate`, `navi enrich tagrule`,
   `navi config keys`.
@@ -210,10 +239,10 @@ See `navi-claude-skills/navi-mcp/SKILL.md` for the full rationale.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `NAVI_WORKDIR` | `~/.navi-mcp` | Where `navi.db` and CSVs live |
-| `NAVI_BIN` | `navi` | Path to the navi executable (override if not on `PATH`) |
-| `NAVI_MCP_ALLOW_WRITES` | unset | Set to `1` to enable platform-write tools |
-| `NAVI_SKILL_DIR` | `<pkg>/resources/skills` | Path to a [navi-claude-skills](https://github.com/packetchaos/navi-claude-skills) checkout |
+| `NAVI_WORKDIR` | `~/.navi-mcp` | Where `navi.db` and CSVs live. **Set this** — the default is rarely where your `navi.db` actually is. |
+| `NAVI_BIN` | `navi` | Path to the navi executable. Set to an absolute path when launched from Claude Desktop (its `PATH` won't include your shell's). |
+| `NAVI_MCP_ALLOW_WRITES` | unset | Set to `1` to enable platform-write tools. |
+| `NAVI_SKILL_DIR` | `<pkg>/resources/skills` | Path to a [navi-claude-skills](https://github.com/packetchaos/navi-claude-skills) checkout. |
 | `NAVI_SKILL_PATH` | unset | **Deprecated** — legacy single-file skill path. Use `NAVI_SKILL_DIR` instead. |
 
 ---
@@ -241,22 +270,38 @@ Most issues have fixes documented in the
 [navi-claude-skills/navi-troubleshooting](https://github.com/packetchaos/navi-claude-skills/blob/main/navi-troubleshooting/SKILL.md)
 skill. Common ones:
 
-- **"Zero chunks" on update commands** → API key permissions
+- **`can't open file '.../server.py'` on startup** → the `args` path in your
+  config doesn't exist. Zip extraction often nests a folder
+  (`navi-mcp-suite/navi-mcp-suite/server/server.py`). Run
+  `tools/navi_mcp_config.py` to detect the real path.
+- **`No module named navi_mcp`** → you're launching with `-m navi_mcp` but the
+  package isn't installed in *that* interpreter. Either `pip install -e .` into
+  it, or switch the config to the direct `server.py` path.
+- **`No module named mcp`** → the MCP SDK isn't in the launching interpreter:
+  `</absolute/python3> -m pip install --upgrade mcp`.
+- **Tool calls time out (`MCP error -32001: Request timed out`)** → the call
+  exceeded the client's ~4-minute ceiling. Long syncs — `navi_config_update`
+  for `vulns`/`assets` on a large tenant — must be run at the CLI
+  (`navi config update vulns`), not through a tool call.
+- **"Unauthorized / You may not be authorized or your keys are invalid"** →
+  API key permissions or invalid/expired keys. Re-check `navi config keys` and
+  that the keys carry the needed permissions.
 - **`sqlite3.OperationalError: database is locked`** → disk speed; drop
-  `--threads` on full sync
+  `--threads` on full sync, and don't run a CLI sync and a tool call against the
+  same `navi.db` simultaneously.
 - **Commands return empty results** → navi.db empty (needs
-  `navi config update full`) or keys not set
-- **Schema errors after upgrade** → `rm navi.db && navi config keys ... && navi config update full`
+  `navi config update full`) or keys not set.
+- **Schema errors after upgrade** → `rm navi.db && navi config keys ... && navi config update full`.
 
 If the server fails to start, check:
 
-- Python version is 3.10+
-- `navi` is on `PATH` or `NAVI_BIN` points at the binary
-- `navi config keys` has been set (the server itself doesn't check, but nothing works
-  without them)
+- Python version is 3.12+ (3.10+ for the server alone)
+- `navi` is on `PATH` or `NAVI_BIN` points at the binary (absolute path)
+- `navi config keys` has been set (the server itself doesn't check, but nothing
+  works without them)
 
-Logs go to stderr. Start the server from a terminal to see them, or redirect
-with your MCP client's logging.
+Logs go to stderr. Start the server from a terminal to see them, or check your
+MCP client's logs (Claude Desktop: `~/Library/Logs/Claude/mcp.log`).
 
 ---
 
