@@ -16,7 +16,10 @@ server/      server.py — the MCP server (17 tools + resources)
 skills/      the 11 corrected skills, in NAVI_SKILL_DIR layout
              (<skill>/SKILL.md, plus references/ on the denser ones)
 dist/        the same 11 skills packaged as .skill files
+tools/       navi_mcp_config.py — auto-detects paths, emits the install config
 docs/        audit framework, gap ledger, verified findings, help-crawler
+INSTALL.md   step-by-step install for Claude Desktop
+README.md    this file
 ```
 
 ### The 11 skills
@@ -35,6 +38,13 @@ The server shells out to the `navi` binary and reads the local `navi.db`. It
 does **not** manage API keys — set those out-of-band with `navi config keys`
 first (see `skills/navi-core`).
 
+Launch it over stdio (for Claude Desktop / Claude Code) or HTTP:
+
+```bash
+python server/server.py            # stdio (default); waits for a client
+python server/server.py --http     # streamable HTTP on :8000
+```
+
 Environment variables:
 
 | Var | Purpose | Default |
@@ -46,6 +56,24 @@ Environment variables:
 
 Point `NAVI_SKILL_DIR` at this repo's `skills/` folder (not `dist/` — the
 server reads unpacked folders, not `.skill` zips).
+
+### Install in Claude Desktop
+
+Full walkthrough in **[INSTALL.md](INSTALL.md)**. The short version: don't
+hand-write paths — run the helper with the Python interpreter you want Claude
+Desktop to use (the one that has `mcp` and `navi`), and it discovers
+`server/server.py`, your `navi.db`, the `navi` binary, and `skills/`, then
+prints (or, with `--write`, installs) the config:
+
+```bash
+python tools/navi_mcp_config.py            # print the mcpServers JSON
+python tools/navi_mcp_config.py --write    # merge it into your Claude Desktop config (backs up first)
+```
+
+The launched server entry is `server/server.py` (use an **absolute** path in
+the config — Claude Desktop won't have your shell's `PATH`). After editing the
+config, fully quit and reopen Claude Desktop, then read `navi://workdir` to
+confirm it connected.
 
 ### Tools (17) and the write-gate
 
