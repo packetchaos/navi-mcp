@@ -22,6 +22,8 @@ the one that has both `mcp` and `navi` installed. For example:
 Usage:
     python3 navi_mcp_config.py                 # discover + print JSON
     python3 navi_mcp_config.py --allow-writes  # set NAVI_MCP_ALLOW_WRITES=1
+    python3 navi_mcp_config.py --allow-writes --allow-email  # + NAVI_EMAIL=1 (mail tool)
+    python3 navi_mcp_config.py --allow-writes --allow-remote-code-execution  # + RCE (push tool)
     python3 navi_mcp_config.py --write          # merge into Claude Desktop config (with backup)
     python3 navi_mcp_config.py --root ~/code    # add an extra search root
     # any path can be pinned explicitly to skip discovery:
@@ -173,6 +175,10 @@ def main() -> int:
     ap.add_argument("--python", help="Interpreter for 'command' (default: this one)")
     ap.add_argument("--name", default="navi", help="mcpServers key name (default: navi)")
     ap.add_argument("--allow-writes", action="store_true", help="Set NAVI_MCP_ALLOW_WRITES=1")
+    ap.add_argument("--allow-email", action="store_true",
+                    help="Set NAVI_EMAIL=1 (enables navi_action_mail; also needs --allow-writes)")
+    ap.add_argument("--allow-remote-code-execution", action="store_true",
+                    help="Set NAVI_REMOTE_CODE_EXECUTION=1 (enables navi_action_push; also needs --allow-writes)")
     ap.add_argument("--root", action="append", default=[], help="Extra directory to search (repeatable)")
     ap.add_argument("--write", action="store_true", help="Merge into the Claude Desktop config (with backup)")
     args = ap.parse_args()
@@ -237,6 +243,14 @@ def main() -> int:
     if skills:
         env["NAVI_SKILL_DIR"] = str(skills)
     env["NAVI_MCP_ALLOW_WRITES"] = "1" if args.allow_writes else "0"
+    env["NAVI_EMAIL"] = "1" if args.allow_email else "0"
+    env["NAVI_REMOTE_CODE_EXECUTION"] = "1" if args.allow_remote_code_execution else "0"
+
+    # The two capability gates stack on the master write gate — warn if one is
+    # requested without it, since the tool will refuse to run.
+    if (args.allow_email or args.allow_remote_code_execution) and not args.allow_writes:
+        print("WARNING: --allow-email / --allow-remote-code-execution have no effect "
+              "without --allow-writes (both gates must be open).", file=sys.stderr)
 
     entry = {
         "command": str(python_path),

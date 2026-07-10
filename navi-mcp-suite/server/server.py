@@ -32,6 +32,18 @@ COVERAGE (A15, verified-safe additions):
   • navi_explore_api (GET free / POST/PUT gated) — export-status escape hatch (A4).
   • navi_scan: status/details/history/latest/hosts (read) + pause/resume (write).
   • navi_action_delete: bytag/tgroup/usergroup/tone.
+  • navi_action_mail / navi_action_push (previously CLI-only): now exposed but
+    DOUBLE-GATED. Each requires NAVI_MCP_ALLOW_WRITES=1 AND its own capability
+    env var (NAVI_EMAIL / NAVI_REMOTE_CODE_EXECUTION) AND confirm=True. mail
+    always passes --to/--subject so navi never drops into its interactive
+    prompt (which would deadlock under MCP). push enforces exactly one of
+    command/file and targets a single host (no --tag; loop per IP for groups).
+  • navi_enrich_tag remove semantics clarified: -remove is a CLEAR of the tag's
+    CURRENT membership and ignores any selector. remove=True with no selector is
+    now allowed (a pure clear). remove=True WITH a selector still runs, but the
+    tool attaches a `_warning`: navi runs add-then-remove as two jobs in one
+    call, only adding/updating vs current membership rather than cleanly
+    refreshing. Accurate refresh = clear -> wait ~30 min -> re-apply (two calls).
 DEFERRED (documented at each site — request to add):
   • config agent/network/user/permissions/exclude management.
   • destructive metadata deletes (table/rules/value/category/network/policy).
@@ -40,7 +52,7 @@ DEFERRED (documented at each site — request to add):
 ================================================================================
 
 Exposes:
-  Tools (17):
+  Tools (19):
     navi_config_update      targeted DB refresh
     navi_config             software / sla / url / certificates setup
     navi_explore_query      SQL against navi.db — reads free, writes confirm
@@ -58,6 +70,9 @@ Exposes:
     navi_action_cancel      cancel a running export (needs UUID) — write-gated
     navi_action_encrypt     encrypt a local file
     navi_action_decrypt     decrypt a local file
+    navi_action_mail        email a report/file — gated by NAVI_EMAIL (+writes)
+    navi_action_push        remote command/file to a Linux host — gated by
+                            NAVI_REMOTE_CODE_EXECUTION (+writes)
 
   Resources:
     navi://schema/{table}   column definitions for a navi.db table
@@ -109,6 +124,17 @@ NAVI_WORKDIR.mkdir(parents=True, exist_ok=True)
 
 # Must be "1" to allow any platform-write operation (tags, ACR, adds, deletes…).
 ALLOW_WRITES = os.environ.get("NAVI_MCP_ALLOW_WRITES") == "1"
+
+# Extra capability gates for the two hazardous action commands. Each stacks ON
+# TOP of NAVI_MCP_ALLOW_WRITES — the master write gate must be open AND the
+# specific capability gate must be set to "1" before the tool will run. This
+# forces the operator to opt into email and remote-shell execution as separate,
+# explicit decisions rather than folding them into the general write gate.
+#
+#   NAVI_EMAIL=1                 -> navi_action_mail may send email
+#   NAVI_REMOTE_CODE_EXECUTION=1 -> navi_action_push may run remote commands
+ALLOW_EMAIL = os.environ.get("NAVI_EMAIL") == "1"
+ALLOW_REMOTE_CODE_EXECUTION = os.environ.get("NAVI_REMOTE_CODE_EXECUTION") == "1"
 
 # Path to the navi binary. Override with NAVI_BIN if it's not on PATH.
 NAVI_BIN = os.environ.get("NAVI_BIN", "navi")
@@ -244,6 +270,39 @@ def _require_confirm(tool_name: str, confirm: bool) -> None:
         raise NaviError(
             f"{tool_name} requires confirm=True. Narrate the intended action to "
             f"the user first, then call again with confirm=True."
+        )
+
+
+def _require_email(tool_name: str) -> None:
+    """
+    Gate email delivery. Stacks on the master write gate: BOTH
+    NAVI_MCP_ALLOW_WRITES=1 and NAVI_EMAIL=1 must be set.
+    """
+    _require_writes(tool_name)
+    if not ALLOW_EMAIL:
+        raise NaviError(
+            f"{tool_name} sends email on your behalf and is disabled. Restart the "
+            f"server with NAVI_EMAIL=1 (in addition to NAVI_MCP_ALLOW_WRITES=1) to "
+            f"enable it. This is a separate, security-sensitive opt-in made on the "
+            f"server, not from inside the tool surface, and affects every future "
+            f"session."
+        )
+
+
+def _require_remote_code_execution(tool_name: str) -> None:
+    """
+    Gate remote command execution. Stacks on the master write gate: BOTH
+    NAVI_MCP_ALLOW_WRITES=1 and NAVI_REMOTE_CODE_EXECUTION=1 must be set.
+    """
+    _require_writes(tool_name)
+    if not ALLOW_REMOTE_CODE_EXECUTION:
+        raise NaviError(
+            f"{tool_name} runs shell commands on remote hosts and is disabled. "
+            f"Restart the server with NAVI_REMOTE_CODE_EXECUTION=1 (in addition to "
+            f"NAVI_MCP_ALLOW_WRITES=1) to enable it. Remote code execution is the "
+            f"highest-risk capability in navi — this is a deliberate, separate "
+            f"opt-in made on the server, not from inside the tool surface, and "
+            f"affects every future session."
         )
 
 
@@ -761,8 +820,21 @@ async def navi_enrich_tag(
 
     plugin_output and plugin_regexp are MODIFIERS to plugin.
     Hierarchical: parent_category + parent_value; require_both=True for AND (-all).
-    remove=True clears the tag from all assets first (ephemeral pattern — use for
-    health tags, not stable classifications). tone=True creates a TONE tag.
+    tone=True creates a TONE tag.
+
+    EPHEMERAL REFRESH — `remove=True` is a CLEAR operation, NOT a reassignment.
+    In navi, `-remove` strips the tag from EVERY asset currently carrying it
+    (read from the local tag membership) and IGNORES any selector. You MAY pass
+    a selector together with remove=True, but the tool returns a `_warning`:
+    navi runs the add and the remove as two separate jobs in one call, so it
+    only adds/updates against the CURRENT membership rather than doing a clean
+    refresh, and can strip assets that should stay tagged. For an accurate
+    refresh, run TWO steps:
+      1. Clear:    navi_enrich_tag(category=X, value=Y, remove=True, confirm=True)
+      2. Wait ~30 minutes for propagation.
+      3. Re-apply: navi_enrich_tag(category=X, value=Y, <selector>, confirm=True)
+    The tag UUID is preserved throughout (downstream references keep working).
+    Use this for point-in-time health tags, not stable classifications.
 
     After tagging, allow up to 30 MINUTES for results in the Tenable UI before
     verifying. On large tenants this can exceed the ~4-min call budget; if it
@@ -781,16 +853,46 @@ async def navi_enrich_tag(
         ("plugin_name", plugin_name),
     ]
     provided = [n for n, v in primary_selectors if v is not None]
-    if len(provided) != 1:
-        raise NaviError(f"Pass exactly one primary selector. Got {len(provided)}: {provided}")
-    if (plugin_output or plugin_regexp) and plugin is None:
-        raise NaviError("plugin_output and plugin_regexp are modifiers — they require `plugin`.")
-    if xid is not None and xrefs is None:
-        raise NaviError("xid requires xrefs.")
-    if histid is not None and scanid is None:
-        raise NaviError("histid requires scanid.")
-    if require_both and not (parent_category and parent_value):
-        raise NaviError("require_both=True needs parent_category + parent_value.")
+
+    # When remove=True, a selector is OPTIONAL:
+    #   - no selector  -> a pure CLEAR of the tag's current membership.
+    #   - with selector -> allowed, but flagged: navi runs add-then-remove as two
+    #     independent jobs in one call, which only adds/updates against the
+    #     CURRENT membership rather than doing a clean refresh (see combine_warning).
+    # When remove=False, exactly one selector is required (normal tag create).
+    combine_warning = None
+    if remove:
+        modifiers = [
+            n for n, v in (
+                ("plugin_output", plugin_output), ("plugin_regexp", plugin_regexp),
+                ("xid", xid), ("histid", histid),
+                ("parent_category", parent_category), ("parent_value", parent_value),
+            ) if v is not None
+        ]
+        if require_both:
+            modifiers.append("require_both")
+        if provided + modifiers:
+            combine_warning = (
+                "You combined remove=True with a selector "
+                f"({provided + modifiers}). navi runs the add and the -remove as two "
+                "separate jobs in one call, so this ADDS/UPDATES against the tag's "
+                "CURRENT membership rather than doing a clean refresh — the result "
+                "may be inaccurate (assets that should stay tagged can be stripped). "
+                "For an accurate refresh, run two steps instead: (1) clear with "
+                "remove=True and NO selector, (2) wait ~30 minutes, (3) re-apply the "
+                "selector with no remove. The tag UUID is preserved either way."
+            )
+    else:
+        if len(provided) != 1:
+            raise NaviError(f"Pass exactly one primary selector. Got {len(provided)}: {provided}")
+        if (plugin_output or plugin_regexp) and plugin is None:
+            raise NaviError("plugin_output and plugin_regexp are modifiers — they require `plugin`.")
+        if xid is not None and xrefs is None:
+            raise NaviError("xid requires xrefs.")
+        if histid is not None and scanid is None:
+            raise NaviError("histid requires scanid.")
+        if require_both and not (parent_category and parent_value):
+            raise NaviError("require_both=True needs parent_category + parent_value.")
 
     args = ["enrich", "tag", "--c", category, "--v", value]
     if description:
@@ -857,10 +959,23 @@ async def navi_enrich_tag(
         await run_navi(args, cli_hint='navi enrich tag (rerun at CLI; see --help)'),
         "navi enrich tag",
     )
-    result["_notice"] = (
-        "Tag created. Allow up to 30 minutes for results to appear in the "
-        "Tenable UI before running verification queries."
-    )
+    if combine_warning is not None:
+        result["_warning"] = combine_warning
+        result["_notice"] = (
+            "Tag add + remove ran together (see _warning). Allow up to 30 minutes "
+            "for results in the Tenable UI before verifying."
+        )
+    elif remove:
+        result["_notice"] = (
+            "Tag CLEARED from its current assets (UUID preserved). Allow ~30 minutes "
+            "for the removal to propagate, THEN re-apply with the same category/value "
+            "and a selector (no remove=True) to complete the ephemeral refresh."
+        )
+    else:
+        result["_notice"] = (
+            "Tag created. Allow up to 30 minutes for results to appear in the "
+            "Tenable UI before running verification queries."
+        )
     return result
 
 
@@ -1300,8 +1415,10 @@ async def navi_was(
 # ---------------------------------------------------------------------------
 # Intentionally NOT exposed: `navi action plan` (CSV batch tagger — compose
 # per-rule navi_enrich_tag instead, more auditable), `navi action automate`,
-# `navi action deploy` (containers), `navi action push` / `navi action mail`
-# (CLI-only by design). See navi-action / navi-mcp skills.
+# `navi action deploy` (containers). `navi action mail` / `navi action push`
+# ARE now exposed (navi_action_mail / navi_action_push), but each is
+# double-gated behind its own capability env var on top of the write gate.
+# See navi-mail / navi-remote-exec / navi-action skills.
 
 # `agent` and `exclusion` removed — they are NOT `action delete` subcommands.
 # (Agent group-membership: `config agent remove`. Exclusions: `config exclude`.
@@ -1456,6 +1573,102 @@ async def navi_action_decrypt(file: str) -> dict:
     return _raise_on_error(await run_navi(["action", "decrypt", "--file", file]), "action decrypt")
 
 
+@mcp.tool(
+    annotations=_anno(
+        title="Email a report/file (gated: NAVI_EMAIL)",
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True,
+    )
+)
+async def navi_action_mail(
+    to: str,
+    subject: str = "navi report",
+    file: str | None = None,
+    message: str = "",
+    confirm: bool = False,
+) -> dict:
+    """
+    Send an email via `navi action mail`, optionally attaching a file.
+
+    DOUBLE-GATED: requires NAVI_MCP_ALLOW_WRITES=1 AND NAVI_EMAIL=1 on the
+    server, plus confirm=True after you narrate the recipient/subject/attachment
+    to the user. Email delivery uses the SMTP settings configured out-of-band via
+    `navi config smtp` (not exposed here).
+
+    Args:
+      to       Recipient email address (REQUIRED — always passed so navi never
+               drops into its interactive prompt, which would hang under MCP).
+      subject  Email subject. navi appends " - Emailed by navi". Always passed.
+      file     Optional path to a file to attach (absolute or relative to
+               NAVI_WORKDIR). Encrypt sensitive files first via
+               navi_action_encrypt and attach the .enc.
+      message  Optional body text.
+
+    Compose with navi_export (produce the CSV) or navi_action_encrypt (secure a
+    sensitive attachment) before mailing.
+    """
+    _require_email("navi_action_mail")
+    _require_confirm("navi_action_mail", confirm)
+    if not to.strip():
+        raise NaviError("`to` (recipient email) is required and cannot be empty.")
+
+    # navi's mail command prompts via input() when --to/--subject are empty,
+    # which deadlocks under MCP (stdin is DEVNULL). Always pass both non-empty.
+    args = ["action", "mail", "--to", to, "--subject", subject or "navi report"]
+    if message:
+        args += ["--message", message]
+    if file:
+        args += ["--file", file]
+    return _raise_on_error(await run_navi(args, timeout=120), "action mail")
+
+
+@mcp.tool(
+    annotations=_anno(
+        title="Run a command on a remote host (DANGEROUS: NAVI_REMOTE_CODE_EXECUTION)",
+        readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True,
+    )
+)
+async def navi_action_push(
+    target: str,
+    command: str | None = None,
+    file: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """
+    Run a shell command on — or push a file to — a single Linux host via
+    `navi action push` (SSH). This is REMOTE CODE EXECUTION.
+
+    DOUBLE-GATED: requires NAVI_MCP_ALLOW_WRITES=1 AND
+    NAVI_REMOTE_CODE_EXECUTION=1 on the server, plus confirm=True after you spell
+    out the exact target and command to the user. SSH credentials come from
+    `navi config ssh`, set out-of-band.
+
+    Args:
+      target   Target host IP (REQUIRED). push hits ONE host — there is no --tag.
+               To run across a tagged group, enumerate the tag's asset IPs and
+               call this tool once per IP.
+      command  Shell command to run on the target (mutually exclusive with file).
+      file     Local file to copy to the target via scp (mutually exclusive with
+               command).
+
+    Exactly one of `command` or `file` must be provided. Narrate the literal
+    command and target before every call — a bad command here can take a host
+    down.
+    """
+    _require_remote_code_execution("navi_action_push")
+    _require_confirm("navi_action_push", confirm)
+    if not target.strip():
+        raise NaviError("`target` (host IP) is required and cannot be empty.")
+    if bool(command) == bool(file):
+        raise NaviError("Provide exactly one of `command` or `file` (not both, not neither).")
+
+    args = ["action", "push", "--target", target]
+    if command:
+        args += ["--command", command]
+    if file:
+        args += ["--file", file]
+    return _raise_on_error(await run_navi(args, timeout=180), "action push")
+
+
 # ---------------------------------------------------------------------------
 # Resources
 # ---------------------------------------------------------------------------
@@ -1531,6 +1744,8 @@ def navi_workdir() -> str:
         f"navi.db present: {db_path.exists()}\n"
         f"navi.db size: {db_path.stat().st_size if db_path.exists() else 0} bytes\n"
         f"writes enabled: {ALLOW_WRITES}\n"
+        f"email enabled (NAVI_EMAIL): {ALLOW_EMAIL}\n"
+        f"remote code execution enabled (NAVI_REMOTE_CODE_EXECUTION): {ALLOW_REMOTE_CODE_EXECUTION}\n"
         f"navi binary: {NAVI_BIN}\n"
         f"call budget: {MCP_CALL_BUDGET:.0f}s (operations longer than this must run at the CLI)\n"
         f"{freshness}\n"
@@ -1549,6 +1764,8 @@ SKILL_NAMES = {
     "export": "navi-export",
     "scan": "navi-scan",
     "action": "navi-action",
+    "mail": "navi-mail",
+    "remote-exec": "navi-remote-exec",
     "was": "navi-was",
 }
 
@@ -1559,7 +1776,7 @@ def navi_skill(name: str) -> str:
     Load a navi-claude-skills domain skill by short name.
 
     Valid names: router, mcp, core, troubleshooting, enrich, acr, explore,
-    export, scan, action, was. The router is injected by the navi_workflow
+    export, scan, action, mail, remote-exec, was. The router is injected by the navi_workflow
     prompt; load others on demand when the request matches their scope.
 
     Domain skills use progressive disclosure: SKILL.md is the lean index, and
@@ -1646,7 +1863,8 @@ _TOOL_LINE = (
     "navi_config_update, navi_config, navi_explore_query, navi_explore_data, "
     "navi_explore_info, navi_explore_api, navi_enrich_tag, navi_enrich_acr, "
     "navi_enrich_add, navi_export, navi_scan, navi_was, navi_action_delete, "
-    "navi_action_rotate, navi_action_cancel, navi_action_encrypt, navi_action_decrypt"
+    "navi_action_rotate, navi_action_cancel, navi_action_encrypt, navi_action_decrypt, "
+    "navi_action_mail, navi_action_push"
 )
 
 
@@ -1708,8 +1926,10 @@ def main() -> None:
     skill_mode = "legacy single-file" if SKILL_PATH_LEGACY is not None else "split"
     skill_location = SKILL_PATH_LEGACY if SKILL_PATH_LEGACY is not None else SKILL_DIR
     log.info(
-        "starting navi-mcp (workdir=%s, writes=%s, budget=%.0fs, skill_mode=%s, skill_location=%s)",
-        NAVI_WORKDIR, ALLOW_WRITES, MCP_CALL_BUDGET, skill_mode, skill_location,
+        "starting navi-mcp (workdir=%s, writes=%s, email=%s, rce=%s, budget=%.0fs, "
+        "skill_mode=%s, skill_location=%s)",
+        NAVI_WORKDIR, ALLOW_WRITES, ALLOW_EMAIL, ALLOW_REMOTE_CODE_EXECUTION,
+        MCP_CALL_BUDGET, skill_mode, skill_location,
     )
     mcp.run(transport="streamable-http" if args.http else "stdio")
 

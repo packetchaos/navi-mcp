@@ -42,6 +42,17 @@ file first, then adds a `navi` entry — your other settings are preserved):
 Add `--allow-writes` when you want tagging / ACR / delete enabled (it sets
 `NAVI_MCP_ALLOW_WRITES=1`). Leave it off to start read-only.
 
+Two hazardous tools are behind their own extra gate on top of writes:
+
+- `--allow-email` sets `NAVI_EMAIL=1` → enables `navi_action_mail`.
+- `--allow-remote-code-execution` sets `NAVI_REMOTE_CODE_EXECUTION=1` → enables
+  `navi_action_push`.
+
+Both must be used **alongside** `--allow-writes` (they have no effect without
+it). Only add them if you actually want the server to send email / run remote
+commands. Email also needs `navi config smtp`, and push needs `navi config ssh`
+(set out-of-band). Example: `... --write --allow-writes --allow-email`.
+
 If a path comes back wrong or missing, pin it explicitly, e.g.:
 
 ```bash
@@ -67,7 +78,9 @@ environment, so a bare `"python"` or relying on `PATH` for `navi` will fail.
         "NAVI_BIN": "/absolute/path/to/navi",
         "NAVI_WORKDIR": "/absolute/path/to/folder-with-navi.db",
         "NAVI_SKILL_DIR": "/absolute/path/to/navi-mcp-suite/skills",
-        "NAVI_MCP_ALLOW_WRITES": "0"
+        "NAVI_MCP_ALLOW_WRITES": "0",
+        "NAVI_EMAIL": "0",
+        "NAVI_REMOTE_CODE_EXECUTION": "0"
       }
     }
   }
@@ -92,8 +105,9 @@ rather than creating a second one.
 **Fully quit Claude Desktop (⌘Q) and reopen** — the config is read only at
 launch. Then confirm it connected: ask Claude to read the `navi://workdir`
 resource. It should report your `navi.db` location, freshness, and whether
-writes are enabled. The `navi_workflow` prompt also becomes available (it
-surfaces as `/navi` in Desktop — that's the connector name).
+writes, email, and remote code execution are enabled. The `navi_workflow`
+prompt also becomes available (it surfaces as `/navi` in Desktop — that's the
+connector name).
 
 ## Troubleshooting
 

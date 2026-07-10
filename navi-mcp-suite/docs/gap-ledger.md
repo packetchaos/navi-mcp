@@ -107,9 +107,12 @@ plus the full exclusion-ledger re-validation from framework §3.
 ## Article-derived context — for navi-explore / navi-enrich build (syntax IGNORED per user; use validated modern commands only)
 
 Source: user-supplied navi articles 1–2. The articles use the OLD command
-generation (`navi tag … --output`, `navi keys`, `navi mail`, `navi push`);
-ALL command syntax is disregarded. Only the use-case context below is retained,
-to be expressed with the validated `navi_*` tool surface / current CLI.
+generation — pre-7.5.x names that were later moved under `action`:
+`navi tag … --output` → `navi enrich tag`, `navi mail` → `navi action mail`,
+`navi push` → `navi action push` (`navi keys` → `navi config keys`). The bare
+old forms no longer exist and must not be reproduced. ALL article command syntax
+is disregarded; only the use-case context below is retained, expressed with the
+validated `navi_*` tool surface / current CLI.
 
 **Device fingerprinting via informational plugins (core navi-enrich theme; matches user's standing IoT-fingerprinting interest):**
 - `10863` SSL Certificate Information — dumps X.509 certs from SSL ports. Beyond cert-expiry tracking, the cert content fingerprints IoT/appliances (e.g. Buffalo TeraStation, Splunk). Cross-ref navi-core cert plugins.

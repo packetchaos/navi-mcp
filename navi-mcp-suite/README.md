@@ -1,32 +1,32 @@
 # navi-mcp suite
 
 An MCP server for the [Tenable **navi** CLI](https://github.com/packetchaos/navi)
-(Tenable Vulnerability Management / Tenable One), plus a set of 11 companion
+(Tenable Vulnerability Management / Tenable One), plus a set of 13 companion
 Claude skills that document how to drive it well.
 
 This repository is the result of a full audit and rebuild: the server's tool
 surface was corrected against an authoritative recursive `navi --help` capture,
-and all 11 skills were corrected to match the server + CLI and restructured for
+and all skills were corrected to match the server + CLI and restructured for
 progressive disclosure.
 
 ## Layout
 
 ```
-server/      server.py — the MCP server (17 tools + resources)
-skills/      the 11 corrected skills, in NAVI_SKILL_DIR layout
+server/      server.py — the MCP server (19 tools + resources)
+skills/      the 13 corrected skills, in NAVI_SKILL_DIR layout
              (<skill>/SKILL.md, plus references/ on the denser ones)
-dist/        the same 11 skills packaged as .skill files
+dist/        the same 13 skills packaged as .skill files
 tools/       navi_mcp_config.py — auto-detects paths, emits the install config
 docs/        audit framework, gap ledger, verified findings, help-crawler
 INSTALL.md   step-by-step install for Claude Desktop
 README.md    this file
 ```
 
-### The 11 skills
+### The 13 skills
 
 `navi` (router) · `navi-core` · `navi-mcp` · `navi-troubleshooting` ·
 `navi-acr` · `navi-export` · `navi-scan` · `navi-was` · `navi-action` ·
-`navi-explore` · `navi-enrich`
+`navi-mail` · `navi-remote-exec` · `navi-explore` · `navi-enrich`
 
 Each `SKILL.md` is under 500 lines. Deep material (full schema, exhaustive
 selector catalog, long worked examples) lives in `references/*.md` and is
@@ -51,8 +51,17 @@ Environment variables:
 |---|---|---|
 | `NAVI_SKILL_DIR` | Path to the **`skills/`** directory in this repo (so the `navi://skill/...` resources resolve) | — |
 | `NAVI_MCP_ALLOW_WRITES` | Set to `1` to enable platform-write tools (tagging, ACR, delete, rotate, scan control, …). Off = read-only. | unset (read-only) |
+| `NAVI_EMAIL` | Set to `1` to enable `navi_action_mail` (email). **Double gate** — also requires `NAVI_MCP_ALLOW_WRITES=1`. | unset (off) |
+| `NAVI_REMOTE_CODE_EXECUTION` | Set to `1` to enable `navi_action_push` (remote command/file execution over SSH). **Double gate** — also requires `NAVI_MCP_ALLOW_WRITES=1`. | unset (off) |
 | `NAVI_WORKDIR` | Directory holding `navi.db` and CSV exports | cwd |
 | `NAVI_BIN` | Path to the `navi` executable | `navi` |
+
+`NAVI_EMAIL` and `NAVI_REMOTE_CODE_EXECUTION` are deliberate, separate opt-ins
+stacked on the master write gate: enabling writes alone does **not** enable
+email or remote execution. `navi_action_mail` needs SMTP set via `navi config
+smtp`; `navi_action_push` needs SSH creds via `navi config ssh` (both
+out-of-band). The config helper exposes matching flags: `--allow-email` and
+`--allow-remote-code-execution` (each used alongside `--allow-writes`).
 
 Point `NAVI_SKILL_DIR` at this repo's `skills/` folder (not `dist/` — the
 server reads unpacked folders, not `.skill` zips).
@@ -75,7 +84,7 @@ the config — Claude Desktop won't have your shell's `PATH`). After editing the
 config, fully quit and reopen Claude Desktop, then read `navi://workdir` to
 confirm it connected.
 
-### Tools (17) and the write-gate
+### Tools (19) and the write-gate
 
 Read tools (`navi_explore_data`, `navi_explore_info`, `navi_explore_query`
 SELECT, `navi_export`, `navi_explore_api` GET, scan read views, …) run freely.
@@ -85,6 +94,15 @@ and are meant to be narrated to the user before invocation:
 (create/start/stop/pause/resume), `navi_was` (scan/start/upload),
 `navi_action_delete`, `navi_action_rotate`, `navi_action_cancel`,
 `navi_config(kind="url")`, and `navi_explore_api` POST/PUT.
+
+**Double-gated tools** need a second capability env var on top of the write
+gate, plus `confirm=True`:
+
+- `navi_action_mail` — email; requires `NAVI_MCP_ALLOW_WRITES=1` **and**
+  `NAVI_EMAIL=1`. Harness: `skills/navi-mail`.
+- `navi_action_push` — remote command/file execution over SSH; requires
+  `NAVI_MCP_ALLOW_WRITES=1` **and** `NAVI_REMOTE_CODE_EXECUTION=1`. Harness:
+  `skills/navi-remote-exec`.
 
 ### Resources
 
@@ -100,8 +118,10 @@ Plus the `navi_workflow` prompt, which injects the router skill.
 navi exports can run for tens of minutes on large tenants — past the MCP host's
 ~4-minute tool-call ceiling. The server enforces a call budget (~220s) and
 returns a clean error naming the CLI command to run instead. Foundational syncs
-(`navi config update full`) and remote command execution (`navi action push`)
-are intentionally CLI-only. See `skills/navi-core` and `skills/navi-troubleshooting`.
+(`navi config update full`) remain intentionally CLI-only. Remote command
+execution and email (`navi_action_push` / `navi_action_mail`) are now exposed as
+tools, but each is double-gated (see above). See `skills/navi-core` and
+`skills/navi-troubleshooting`.
 
 ## Installing the skills as Claude skills
 
