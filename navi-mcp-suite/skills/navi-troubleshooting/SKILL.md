@@ -222,7 +222,7 @@ empty results. Always check this first before any other troubleshooting.
 
 ## Database errors after upgrading navi
 
-After any `pip install --upgrade navi-hostio` or new container build, the
+After any `pip install --upgrade navi-pro` or new container build, the
 existing navi.db will have a schema mismatch with the new navi version.
 
 **Standalone recovery:**

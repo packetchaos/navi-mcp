@@ -83,7 +83,7 @@ any row, jump to the referenced skill.
 
 | User says | Tool call / Path | Skill |
 |---|---|---|
-| "install navi" | CLI: `pip install navi-hostio` | navi-core |
+| "install navi" | CLI: `pip install navi-pro` | navi-core |
 | "set up API keys" | CLI (out-of-band): `navi config keys --a <> --s <>` | navi-core |
 | "what version am I running" | `navi_explore_info(subcommand="version")` | navi-core |
 | "update my database" (targeted) | `navi_config_update(kind="vulns")` etc. | navi-core |

@@ -209,7 +209,7 @@ async def run_navi(
     except FileNotFoundError as e:
         raise NaviError(
             f"navi binary not found at '{NAVI_BIN}'. "
-            f"Install navi (`pip install navi-hostio`) or set NAVI_BIN."
+            f"Install navi (`pip install navi-pro`) or set NAVI_BIN."
         ) from e
     except subprocess.TimeoutExpired as e:
         partial_out = (

@@ -8,7 +8,7 @@ those are set out-of-band in navi before you start.
 - **Python 3.12+** (navi requires it).
 - **navi installed and configured**, with a populated database:
   ```bash
-  pip3 install navi-hostio
+  pip3 install navi-pro
   navi config keys --a "<ACCESS_KEY>" --s "<SECRET_KEY>"
   navi config update full          # populates navi.db — do this before connecting
   ```
