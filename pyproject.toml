@@ -1,0 +1,117 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "navi-mcp"
+version = "1.0.0"
+description = "MCP server wrapping the Tenable navi CLI for Vulnerability Management and Exposure Management workflows."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["mcp", "tenable", "navi", "vulnerability-management", "exposure-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# The whole point of this file: the SDK dependency is declared and enforced at
+# install time, with BOTH bounds.
+#
+#   Floor  (>=1.9)  server.py imports mcp.server.fastmcp (line 186) and
+#                   mcp.types.ToolAnnotations (line 191).
+#
+#   CEILING (<2)    NOT optional, and NOT conservatism. mcp 2.0.0 is a breaking
+#                   release: `mcp.server.fastmcp` was renamed to
+#                   `mcp.server.mcpserver`, and the `FastMCP` class became
+#                   `MCPServer`. FastMCP does not exist anywhere in 2.x.
+#                   Installing mcp 2.x against this server.py produces, at
+#                   import time and before any tool runs:
+#
+#                       ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+#
+#                   which surfaces in Claude Desktop only as "Server disconnected".
+#                   `pip install --upgrade mcp` is therefore the one thing that
+#                   RE-BREAKS this server. The ceiling is what stops it.
+#
+# Removing the ceiling requires migrating server.py to the 2.x API first
+# (from mcp.server.mcpserver import MCPServer, plus decorator/Context changes).
+dependencies = [
+    "mcp>=1.9,<2",
+]
+
+[project.optional-dependencies]
+# The server shells out to the `navi` binary via NAVI_BIN (default: "navi").
+# Installing this extra puts navi in the SAME environment as the server, so the
+# default resolves without hand-wiring an absolute path in the client config.
+navi = ["navi-pro>=8.5"]
+
+[project.scripts]
+navi-mcp = "navi_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/packetchaos/navi-mcp"
+Issues = "https://github.com/packetchaos/navi-mcp/issues"
+
+# ---------------------------------------------------------------------------
+# Build mapping
+#
+# The repo keeps its human-facing layout (navi-mcp-suite/server, .../skills).
+# Hatch remaps those into an importable package at build time, so no files move
+# and git history is preserved:
+#
+#   navi-mcp-suite/server/*.py   ->  navi_mcp/*.py
+#   navi-mcp-suite/skills/**     ->  navi_mcp/resources/skills/**
+#
+# The skills mapping is load-bearing: server.py defaults NAVI_SKILL_DIR to
+# Path(__file__).parent / "resources" / "skills". Under this layout that default
+# resolves to the shipped skills, so NAVI_SKILL_DIR becomes optional instead of
+# a trap that silently 404s every skill resource.
+#
+# KNOWN LIMITATION — editable installs are NOT supported with this mapping:
+#
+#     pip install -e .   ->   ValueError: Dev mode installations are unsupported
+#                             when any path rewrite in the `sources` option
+#                             changes a prefix rather than removes it
+#
+# Both rewrites below RENAME a prefix, which the editables backend cannot
+# represent. Use a regular install (`pip install .`); reinstall after editing
+# server.py. For a live-edit development loop, skip the package entirely and
+# point the client config straight at the file, which reads from the working
+# tree on every start:
+#
+#     "command": "<python-with-mcp-1.x>",
+#     "args":    ["<repo>/navi-mcp-suite/server/server.py"],
+#     "env":     { "NAVI_SKILL_DIR": "<repo>/navi-mcp-suite/skills", ... }
+#
+# Making `-e` work requires a conventional src/ layout — moving
+# navi-mcp-suite/server/*.py to src/navi_mcp/ and navi-mcp-suite/skills/ to
+# src/navi_mcp/resources/skills/ — at the cost of relocating the tree that
+# tools/, tests/, and the docs currently reference.
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+only-include = ["navi-mcp-suite/server", "navi-mcp-suite/skills"]
+exclude = [
+    "navi-mcp-suite/server/tests",
+    "**/__pycache__",
+    "**/*.pyc",
+]
+
+[tool.hatch.build.targets.wheel.sources]
+"navi-mcp-suite/server" = "navi_mcp"
+"navi-mcp-suite/skills" = "navi_mcp/resources/skills"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "navi-mcp-suite/",
+    "README.md",
+    "INSTALL.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = ["**/__pycache__", "**/*.pyc"]

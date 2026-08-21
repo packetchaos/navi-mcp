@@ -26,6 +26,11 @@ INSTALL.md   step-by-step install for Claude Desktop
 README.md    this file
 ```
 
+At the repo root, `pyproject.toml` builds the above into an installable package
+(`navi-mcp-suite/server/` → `navi_mcp/`, `navi-mcp-suite/skills/` →
+`navi_mcp/resources/skills/`) without moving any files, and `fix-mcp.sh` is a
+doctor script that checks the whole launch chain.
+
 ### The 17 skills
 
 Driving the server: `navi` (router) · `navi-core` · `navi-mcp` ·
@@ -61,9 +66,35 @@ The server shells out to the `navi` binary and reads the local `navi.db`. It
 does **not** manage API keys — set those out-of-band with `navi config keys`
 first (see `skills/navi-core`).
 
+### Requirements
+
+**`mcp` >= 1.9, < 2.** The upper bound is not caution — `mcp` 2.0 renamed
+`mcp.server.fastmcp` to `mcp.server.mcpserver` and `FastMCP` to `MCPServer`, so
+2.x fails at import with `ModuleNotFoundError: No module named
+'mcp.server.fastmcp'` before any tool registers. In Claude Desktop that appears
+only as "Server disconnected". **Do not run `pip install --upgrade mcp`** — it
+installs 2.x. Installing this project as a package enforces the pin for you.
+
+### Install
+
 ```bash
-python server/server.py            # stdio (default); waits for a client
-python server/server.py --http     # streamable HTTP on :8000
+pip install .                # or: pip install "git+https://github.com/packetchaos/navi-mcp"
+pip install ".[navi]"        # also pulls navi-pro into the same environment
+```
+
+### Run
+
+```bash
+navi-mcp                           # stdio (default); waits for a client
+navi-mcp --http                    # streamable HTTP on :8000
+python -m navi_mcp                 # equivalent entry point
+```
+
+From a checkout, without installing:
+
+```bash
+python navi-mcp-suite/server/server.py            # stdio
+python navi-mcp-suite/server/server.py --http     # streamable HTTP on :8000
 ```
 
 ## Environment variables
@@ -76,7 +107,7 @@ them can be changed from inside a tool call, which is the point for the gates.
 |---|---|---|
 | `NAVI_WORKDIR` | Directory holding `navi.db` and CSV exports. The server runs every navi subprocess with this as its cwd. | **`~/.navi-mcp`** — created on startup if missing |
 | `NAVI_BIN` | Path to the `navi` executable | `navi` (resolved on `PATH`) |
-| `NAVI_SKILL_DIR` | The **`skills/`** directory in this repo, so the `navi://skill/...` resources resolve | **`<dir of server.py>/resources/skills`** — which does not exist in this layout, so skill resources 404 until you set it |
+| `NAVI_SKILL_DIR` | The **`skills/`** directory, so the `navi://skill/...` resources resolve | **`<dir of server.py>/resources/skills`**. Installed as a package this resolves to the bundled skills and the var is optional; running from a checkout it does not exist, so skill resources 404 until you set it |
 | `NAVI_SKILL_PATH` | Legacy: a single monolithic `SKILL.md`. Setting it puts the server in single-file mode and `NAVI_SKILL_DIR` is ignored. Prefer `NAVI_SKILL_DIR`. | unset |
 | `NAVI_MCP_ALLOW_WRITES` | `1` opens the master write gate (see below) | unset → **read-only** |
 | `NAVI_EMAIL` | `1` enables `navi_action_mail`. Stacks on the write gate. | unset → off |
@@ -187,24 +218,48 @@ Rebuilding both tables at once is `navi config update full -rebuild` at the CLI;
 
 ### Install in Claude Desktop
 
-Full walkthrough in **[INSTALL.md](INSTALL.md)**. The short version: don't
-hand-write paths — run the helper with the Python interpreter you want Claude
-Desktop to use (the one that has `mcp` and `navi`), and it discovers
-`server/server.py`, your `navi.db`, the `navi` binary, and `skills/`, then
-prints (or, with `--write`, installs) the config:
+Full walkthrough in **[INSTALL.md](INSTALL.md)**. The short version — install
+the package, then point the config at the console script:
+
+```bash
+pip install ".[navi]"
+which navi-mcp          # absolute path for "command"
+```
+
+```json
+{
+  "mcpServers": {
+    "navi": {
+      "command": "/absolute/path/to/navi-mcp",
+      "env": {
+        "NAVI_WORKDIR": "/absolute/path/to/folder-with-navi.db",
+        "NAVI_MCP_ALLOW_WRITES": "0",
+        "NAVI_EMAIL": "0",
+        "NAVI_REMOTE_CODE_EXECUTION": "0"
+      }
+    }
+  }
+}
+```
+
+No `args`, no `NAVI_SKILL_DIR` (the skills ship in the package), and no
+`NAVI_BIN` when `navi` is installed alongside via the `[navi]` extra. Use an
+**absolute** path — Claude Desktop won't have your shell's `PATH`.
+
+Running from a checkout instead? Let the helper discover the paths, run with the
+interpreter you want Claude Desktop to use:
 
 ```bash
 python tools/navi_mcp_config.py            # print the mcpServers JSON
-python tools/navi_mcp_config.py --write    # merge into your Claude Desktop config (backs up first)
+python tools/navi_mcp_config.py --write    # merge into your config (backs up first)
 ```
 
 Gate flags on the helper map one-to-one to the env vars above:
 `--allow-writes`, `--allow-email`, `--allow-remote-code-execution`. The last two
 have no effect without the first.
 
-The launched server entry is `server/server.py` (use an **absolute** path — Claude
-Desktop won't have your shell's `PATH`). After editing the config, fully quit and
-reopen Claude Desktop, then read `navi://workdir` to confirm it connected.
+After editing the config, fully quit and reopen Claude Desktop, then read
+`navi://workdir` to confirm it connected.
 
 ### Resources
 
@@ -254,7 +309,10 @@ skills here ended up describing a server that had moved on without them. The
 ## Validation status
 
 `server.py` compiles cleanly, every tool is annotated, all 20 register, and the
-suites in `server/tests/` are green. Tool annotations require a recent `mcp` SDK.
+suites in `server/tests/` are green. Tool annotations require `mcp` >= 1.9;
+`mcp.types.ToolAnnotations` is imported behind a `try/except` so an older SDK
+degrades to unannotated tools rather than failing. A 2.x SDK does **not** degrade
+gracefully — it fails outright, which is why the dependency is pinned `<2`.
 
 It has **not** been runtime-tested against a live Tenable tenant. The checks
 verify what the server *asks navi to do*; they cannot verify what navi and the
