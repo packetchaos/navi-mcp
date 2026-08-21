@@ -1,19 +1,20 @@
 ---
 name: navi-troubleshooting
 description: >
-  Troubleshooting skill for Tenable navi CLI. Use for ANY request involving navi
-  errors, unexpected results, or "it's not working" symptoms. Covers: "zero
-  chunks" on update commands, sqlite3 database locked errors, slow tagging
-  performance, commands returning empty results, missing assets, database
-  errors after upgrading navi, schema mismatches, MCP tool-call timeouts on
-  long-running syncs. Also covers the SQL index pattern for accelerating
-  repeat tagging workloads and the purpose-built workload alternative. Trigger
-  on: "navi isn't working", "error", "zero chunks", "db locked", "database is
-  locked", "sqlite3.OperationalError", "empty results", "no data returned",
-  "missing assets", "tagging is slow", "after upgrade", "schema mismatch",
-  "timeout", "tool call timed out", "why doesn't this work", "what went
-  wrong", "fix my navi". Companion: navi-core (setup, schema — preventive
-  context for most issues here).
+  Troubleshooting skill for Tenable navi CLI. Use for ANY request involving
+  navi errors, unexpected results, or "it's not working" symptoms. Covers:
+  "zero chunks" on update commands, sqlite3 database locked errors, slow
+  tagging, empty results, missing assets, database errors after upgrading
+  navi, schema mismatches, and MCP tool-call timeouts on long syncs. Also
+  covers the SQL index pattern, the purpose-built workload alternative, and
+  the sync failure modes: a `since`/`updated_at` watermark silently overriding
+  `days`, a millisecond timestamp where epoch seconds are expected, vulns that
+  look frozen because `since` returns only state changes, `state`/`severity`
+  replacing navi's default instead of narrowing it, and a table left tiny by a
+  rebuild that carried a filter. Trigger on: "navi isn't working", "error",
+  "zero chunks", "db locked", "empty results", "missing assets", "tagging is
+  slow", "after upgrade", "timeout", "my sync returns nothing", "where did my
+  findings go", "fix my navi".
 ---
 
 # Navi Troubleshooting — Common Issues & Fixes
@@ -56,6 +57,27 @@ broken in the recent past. If `--days 365` returns data but `--days 7`
 doesn't, you have a recent scanner outage — the older data was already
 in Tenable, the new data isn't being collected. Fix scanner health
 (item 2), then re-run with a wider window once to catch up.
+
+**Check for a stray `--since` / `--updated_at` first.** These override
+`--days` entirely, so a command that *looks* like it has a 365-day window
+may be running against a watermark instead:
+
+```bash
+navi config update vulns --days 365 --since 1755000000   # --days is IGNORED
+```
+
+Zero chunks here means "nothing changed state since that epoch," which on a
+quiet tenant is a perfectly ordinary answer — not a fault. Two ways this
+bites: a watermark accidentally left at a recent timestamp, and a watermark
+in a scheduled job that already ran successfully minutes earlier. Drop the
+timestamp flag to test the window properly. And confirm the value really is
+**epoch seconds** — a millisecond timestamp is a date ~55,000 years out, and
+every sync against it returns zero chunks forever.
+
+Note that a `--since` sync on vulns returns only **state changes**. A tenant
+where nothing opened, closed, or reopened returns zero chunks even though
+scans ran and findings were re-observed. See navi-core's "Choosing a sync
+window" for the full semantics.
 
 ### 2. Scanners are failing
 
@@ -136,10 +158,10 @@ navi config update full --threads 20  # max — SSD only
 If running on a VM with slow disk I/O or a shared NAS, `--threads 1` is
 the right default.
 
-**Thread count on targeted updates**: `navi_config_update` tool calls use
-the server's configured default; if locks appear during targeted
-refreshes, your operator can lower the default in the navi-mcp server
-config.
+**Thread count on targeted updates**: `threads` is a tool parameter —
+`navi_config_update(kind="vulns", threads=1)` throttles a targeted refresh
+without leaving MCP or involving your operator. Valid range 1–20, enforced
+server-side.
 
 **Prevention**: on known-slow storage (shared NAS, VM with contention,
 HDD), start with `--threads 1` before scaling up. Faster to reduce later
@@ -186,8 +208,8 @@ and what each accelerates — are in **`references/slow-tagging.md`**
    `navi_explore_query(sql="SELECT MAX(last_found) FROM vulns;")`
 
    NULL or very old means the foundational `navi config update full`
-   hasn't been run at the terminal. See navi-mcp's "Too heavy for a tool
-   call" section for why this command is CLI-only.
+   hasn't been run at the terminal. See "Too heavy for a tool call" in
+   navi-mcp's `references/commands-not-exposed.md` for why it is CLI-only.
 
 2. **Check `navi://workdir`** to see where navi.db is and whether
    write-gate is enabled.
@@ -214,7 +236,11 @@ empty results. Always check this first before any other troubleshooting.
 |---|---|
 | Every command returns empty | Keys not set, or navi.db empty |
 | Some assets missing, others present | Key scope narrower than expected |
-| Data older than you expect | No recent `config update full` |
+| Data older than you expect | No recent sync — or `since` watermarks only, which never refresh unchanged findings |
+| A whole time range missing after a sync | `--since` / `--updated_at` silently overrode `--days` |
+| A table lost most of its rows overnight | A rebuild run with a scoping parameter — unconditional drop, filtered download |
+| Rebuilt table holds only recent churn | Rebuild paired with `since` / `updated_at` — no baseline was ever loaded |
+| Nothing at all after a "successful" sync | Watermark passed in milliseconds instead of epoch seconds |
 | Tagging commands tag zero assets | Stale agents table (run `navi_config_update(kind="agents")`) |
 | Agent-based tags return nothing | Agents kind NOT included in `config update full` — run separately |
 
@@ -222,8 +248,28 @@ empty results. Always check this first before any other troubleshooting.
 
 ## Database errors after upgrading navi
 
-After any `pip install --upgrade navi-pro` or new container build, the
+After any `pip install --upgrade navi-hostio` or new container build, the
 existing navi.db will have a schema mismatch with the new navi version.
+
+**Try the narrow fix first, if the errors name only `assets` or `vulns`.**
+A post-upgrade schema mismatch is a documented use case for
+`navi_config_rebuild`: it drops and re-creates just that table, on the
+current schema, without touching navi.db or your API keys.
+
+```
+navi_config_rebuild(kind="vulns", days=365, confirm=True)
+```
+```bash
+navi config optimize      # CLI — the drop most likely took the indexes too
+```
+
+Then refresh the derived tables (`certs`, `software`, `route`, `paths`) —
+the tool's `_notice` lists them.
+
+If the errors name any other table, or survive that, use the full recovery
+below. See navi-core's "`navi_config_rebuild`" for the filter trap to
+avoid — a scoping parameter on the rebuild silently shrinks what comes
+back.
 
 **Standalone recovery:**
 
@@ -374,13 +420,30 @@ before you re-fire anything:
    navi config update assets
    ```
 
-4. **If you must stay in MCP**, shrink the job under the timeout with a
-   lookback window. This is the practical in-MCP lever that keeps a
-   sync inside the timeout:
+4. **If you must stay in MCP, shrink the job.** Narrowing the window is
+   the practical in-MCP lever, and there are three of them — try in this
+   order, narrowest first:
 
    ```
+   # a. Watermark — only what changed since the last successful sync.
+   #    Almost always the smallest possible job.
+   navi_config_update(kind="vulns",  since=<unix ts of last sync>)
+   navi_config_update(kind="assets", updated_at=<unix ts of last sync>)
+
+   # b. Short relative window — re-requests the overlap every run,
+   #    so it's bigger than a watermark covering the same period.
    navi_config_update(kind="vulns", days=7)
    ```
+
+   ```
+   # c. Drop `info`, usually most of a tenant's rows. `severity` is a LIST
+   #    that REPLACES navi's all-five default, so this is one call.
+   navi_config_update(kind="vulns", since=<unix>,
+                      severity=["critical", "high", "medium", "low"])
+   ```
+
+   If even a watermark sync times out, the tenant is too large for the
+   call budget — go to the CLI (step 3) and stay there for syncs.
 
 5. **If navi-mcp is unresponsive afterward**, restart the local MCP
    server before issuing further navi tool calls.
@@ -388,10 +451,28 @@ before you re-fire anything:
 ### Rule of thumb
 
 Through MCP: incremental refreshes you're confident will finish in a few
-minutes (small/scoped tenants, short `days=N` windows). On the CLI: any
-first-time pull, full-history refresh, or anything you expect to run
-long. This is the same reasoning that keeps `navi config update full`
-off the MCP surface — see navi-mcp's "Too heavy for a tool call".
+minutes (small/scoped tenants, a `since=` / `updated_at=` watermark, or a
+short `days=N` window). On the CLI: any first-time pull, full-history
+refresh, or anything you expect to run long. This is the same reasoning
+that keeps `navi config update full` off the MCP surface — see "Too heavy
+for a tool call" in navi-mcp's `references/commands-not-exposed.md`.
+
+### The recurring-sync setup that avoids this entirely
+
+Most timeout reports come from re-running a wide window on a schedule.
+Seed once at the CLI, then keep it current with watermarks:
+
+1. Seed: `navi config update full` at the terminal, then
+   `navi config optimize`.
+2. Record the epoch second *before* each sync starts, and use the
+   previous run's recorded value as the floor for this run.
+3. Refresh with `since=` (vulns) / `updated_at=` (assets).
+4. Reconcile weekly or monthly with a wider `days=30` sweep, because
+   `since` only returns state changes and won't refresh timestamps on
+   findings that haven't moved.
+
+Full semantics and the watermark pattern: navi-core, "Choosing a sync
+window".
 
 ---
 
@@ -414,7 +495,14 @@ above.
 | DB errors after upgrade | Schema mismatch | `rm navi.db` + re-keys + `update full` + `optimize` |
 | Missing assets | Key scoped to subset | Check key permissions in Tenable One |
 | Agent tags return zero | Stale agents table | `navi_config_update(kind="agents")` |
-| `navi_config_update` exceeds the call budget (~220s) | Sync longer than the budget; corrected server returns a clean error naming the CLI command (older server: opaque ~4-min host timeout, export keeps running) | Run on CLI: `navi config update vulns --threads 1`; or shrink with `days=N`. See "Long-running operations and MCP timeouts" |
+| `navi_config_update` exceeds the call budget (~220s) | Sync longer than the budget; corrected server returns a clean error naming the CLI command (older server: opaque ~4-min host timeout, export keeps running) | Shrink with `since=` / `updated_at=` first, then `days=N`, then split by `severity=`; `threads=1` also throttles in-tool. CLI fallback: `navi config update vulns --threads 1`. See "Long-running operations and MCP timeouts" |
+| Zero chunks despite a wide `--days` | `--since` / `--updated_at` overrides `--days` | Drop the timestamp flag; confirm it's epoch **seconds**. See "Zero chunks" |
+| A table lost most of its rows | A rebuild with a scoping parameter — the drop is unconditional, the download is filtered | Re-run `navi_config_rebuild` with a wide `days` and no filters. See navi-core |
+| Fixed findings missing after adding `state` | `state` REPLACES navi's open+reopened default; it does not add to it | Name every state you want: `state=["open","reopened","fixed"]` |
+| Reopened findings vanished after a rebuild | `state=["open"]` on the rebuild — and the old table was already gone | Rebuild again naming all the states you need |
+| Rebuilt table holds only recent churn | Rebuild paired with a `since`/`updated_at` watermark | Re-run the rebuild with a wide `days`, then watermark subsequent syncs |
+| Schema errors after upgrade naming only `assets`/`vulns` | Those tables predate the upgrade | `navi_config_rebuild(kind=..., confirm=True)` on just those tables, before `rm navi.db` |
+| Vulns look frozen while syncs succeed | `since` returns state changes only — unchanged findings never refresh | Add a periodic `days=30` reconciliation sweep. See navi-core, "Choosing a sync window" |
 
 ---
 

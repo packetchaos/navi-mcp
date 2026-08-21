@@ -5,6 +5,12 @@ selector per call; `plugin_output`/`plugin_regexp` modify `plugin`; `xid`
 requires `xrefs`; `histid` requires `scanid`. All tag calls are write-gated.
 The lean selector map + use-case playbook are in SKILL.md.
 
+`regexp=True` switches the match from LIKE to REGEXP for **text** selectors
+only — `plugin_output`, `plugin_name`, `cpe`, `xrefs`, `by_val`, `by_cat`.
+Passing it with anything else raises. On the CLI `-regexp` is a bare boolean
+flag: the pattern goes in `--output` / `--name` / etc., never after `-regexp`.
+See SKILL.md's "`regexp=True`" section.
+
 ### By vulnerability content
 
 Plugin fired:
@@ -25,10 +31,22 @@ navi enrich tag --c "Cat" --v "Val" --plugin <ID> --output "text"
 
 Plugin fired + regex in output:
 
-`navi_enrich_tag(category="Cat", value="Val", plugin=<ID>, plugin_regexp="PATTERN", confirm=True)`
+`navi_enrich_tag(category="Cat", value="Val", plugin=<ID>, plugin_output="PATTERN", regexp=True, confirm=True)`
 
 ```bash
-navi enrich tag --c "Cat" --v "Val" --plugin <ID> -regexp "PATTERN"
+navi enrich tag --c "Cat" --v "Val" --plugin <ID> --output "PATTERN" -regexp
+```
+
+(`plugin_regexp="PATTERN"` is the deprecated spelling of the same thing — it
+still works but returns a deprecation `_warning`.)
+
+Regex across cross-references — unreachable before `regexp` became a global
+parameter:
+
+`navi_enrich_tag(category="Cat", value="Val", xrefs="CISA|IAVA", regexp=True, confirm=True)`
+
+```bash
+navi enrich tag --c "Cat" --v "Val" --xrefs "CISA|IAVA" -regexp
 ```
 
 Text in plugin name:

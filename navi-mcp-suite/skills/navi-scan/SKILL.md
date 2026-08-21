@@ -47,7 +47,7 @@ in mind:
 - **Clean up old scans monthly.** Stale scan objects accumulate and slow
   the TVM UI down measurably. Past ~10,000 scans, dashboard load times
   and scan pickers become noticeably slower.
-  `navi_action_delete(kind="scan", id=<id>, confirm=True)` is the tool
+  `navi_action_delete(kind="scan", object_id=<id>, confirm=True)` is the tool
   for removing them; pair with `navi_explore_info(subcommand="scans")`
   to identify candidates for cleanup.
 - **Prefer scheduled exports over scheduled scans for reporting.** If the
@@ -453,4 +453,4 @@ the verify step.
 | "show me scanners" | `navi_explore_info(subcommand="scanners")` |
 | "show me policies" / "scan templates" | `navi_explore_info(subcommand="policies")` |
 | "show me saved credentials" | `navi_explore_info(subcommand="credentials")` |
-| "clean up old scans" | `navi_explore_info(subcommand="scans")` + `navi_action_delete(kind="scan", id=<id>, confirm=True)` per stale scan |
+| "clean up old scans" | `navi_explore_info(subcommand="scans")` + `navi_action_delete(kind="scan", object_id=<id>, confirm=True)` per stale scan |

@@ -1,16 +1,17 @@
 ---
 name: navi-export
 description: >
-  CSV export skill for Tenable navi CLI. Use for ANY request to export data to CSV
-  from navi. Covers all navi export subcommands: assets, bytag (includes ACR + AES
-  scores), network, licensed, vulns, failures (SLA breaches), route (vulns by route ID),
-  compliance, agents, group (agents by group), users, policy, parsed, compare, and
-  query (custom SQL). Critical distinction: bytag is the ONLY export that includes
-  ACR and AES scores alongside asset data — essential for risk reporting by business
-  segment. Trigger on: "export to CSV", "give me a spreadsheet", "download asset list",
-  "export vulnerabilities", "give me a report", "export compliance", "export by tag",
-  "export users", "export agents", "export policies for migration", "export status",
-  "check on my export", "is my export finished".
+  CSV export skill for Tenable navi CLI. Use for ANY request to export data to
+  CSV from navi. Covers all navi export subcommands: assets, bytag (includes
+  ACR + AES scores), network, licensed, vulns, failures (SLA breaches), route,
+  compliance, agents, group, users, policy, parsed, compare, and query (custom
+  SQL). Two critical distinctions: bytag is the ONLY export carrying ACR and
+  AES scores, and `vulns` intentionally exposes no filters — the navi pattern
+  is tag-then-export-by-tag, or export query for a one-off slice. Trigger on:
+  "export to CSV", "give me a spreadsheet", "download asset list", "export
+  vulnerabilities", "export only criticals", "filter my export", "give me a
+  report", "export compliance", "export by tag", "export users", "export
+  agents", "export status", "is my export finished".
 ---
 
 # Navi Export — CSV Export Reference
@@ -87,6 +88,37 @@ first_found, last_found, etc.`
 ```bash
 navi export vulns
 ```
+
+### Why `vulns` takes no filters — and what to do instead
+
+`navi export vulns` accepts `--c`/`--v`, `--severity`, `--plugin`, `--name`,
+`--output`, `--cve`, `--xrefs`, and `-regexp` on the CLI. **`navi_export`
+exposes none of them, deliberately.** This is a closed decision, not a gap
+waiting to be filled — don't work around it by shelling out.
+
+The navi pattern is **tag, then export by tag**:
+
+1. `navi_enrich_tag(...)` narrows the population once. It carries the full
+   selector surface — `xrefs`, `regexp`, plugin, CVE, CPE, custom SQL — far
+   more than the export flags express.
+2. `navi_export(subcommand="bytag", category=..., value=...)` pulls the CSV.
+
+That route is strictly better, not merely equivalent: **`bytag` is the only
+export carrying ACR and AES**, so the tagged path yields a richer CSV than any
+filtered `export vulns` could. The tag is also reusable and auditable, which a
+one-off flag combination is not.
+
+**For a one-off slice that doesn't deserve a tag**, use
+`navi_export(subcommand="query", sql=...)` — it expresses anything those flags
+could, cross-references included:
+
+```
+navi_export(subcommand="query",
+            sql="SELECT asset_ip, plugin_id, plugin_name, severity "
+                "FROM vulns WHERE xrefs LIKE '%CISA%' AND severity='critical';")
+```
+
+Reach for `subcommand="vulns"` when you genuinely want everything.
 
 Vulnerabilities that have failed SLA thresholds. Requires SLA thresholds
 to be configured first via `navi_config(kind="sla")` — see navi-core.

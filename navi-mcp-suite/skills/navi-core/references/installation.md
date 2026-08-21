@@ -33,7 +33,7 @@ sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt update && sudo apt install python3.12 python3.12-pip
 
 # Then install navi
-pip3 install navi-pro
+pip3 install navi-hostio
 ```
 
 ### Docker — build from source (recommended over the published image)

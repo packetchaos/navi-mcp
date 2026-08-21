@@ -61,6 +61,7 @@ platform-write tools:
 - `navi_explore_api(method="POST"|"PUT", ...)` — mutating API passthrough (GET is read, not gated)
 - `navi_scan` — create, start, stop, pause, resume (status/details/history/hosts/latest/evaluate are read-only, not gated)
 - `navi_was` — scan, start, upload (configs, scans, details, stats, export are read-only, not gated)
+- `navi_config_rebuild` — DROPS and re-creates a local navi.db table; destructive, always write-gated
 - `navi_action_delete` — destructive; always write-gated
 - `navi_action_rotate` — rotates API keys
 - `navi_action_cancel` — cancels a running export (requires the export `uuid`)
@@ -266,7 +267,53 @@ CLI-only command through a tool, and never continues silently past the CLI step.
 
 **The ~4-minute call ceiling** on long targeted syncs
 (`navi_config_update(kind="vulns")` on a large tenant) is covered in **navi-core**
-— its canonical home — including the `days=N` and `--threads 1` CLI fallback.
+— its canonical home — including the window filters (`since=` / `updated_at=` /
+`days=`) and the `--threads 1` CLI fallback. The short version for MCP work: when
+a sync is too big for the call budget, narrow it before handing off to the CLI,
+and `since=<last sync timestamp>` narrows harder than `days=N` because it asks
+only for what changed rather than re-requesting the whole window.
+
+**`update full` is the heavy option, not the default one.** It defaults to a
+30-day vuln / 90-day asset window and can run for hours on a large tenant.
+Don't suggest it as a routine refresh when a targeted
+`navi_config_update(kind=...)` would cover what the user actually asked for.
+
+**`navi_config_update` carries navi's full export-scoping surface**, not just
+`kind` + `days`: `exid`, `threads`, `category`+`value`, `state`, `severity`,
+`vpr_score`+`operator`, `plugin_id`, `since`, `updated_at`. `plugin_id`,
+`state` and `severity` are **lists** — and `state`/`severity` **replace**
+navi's default rather than narrowing it, so `state=["fixed"]` returns fixed
+findings only. `navi_config_rebuild` takes the same set. Each is
+allow-listed per kind and **raises** when passed to a kind that ignores it, so
+a filter never degrades into a silent full-scope sync. Scope is applied by the
+Tenable export rather than after download, which is why a narrow parameter is
+the best defence against the call budget. Combinations navi resolves silently
+(`days` + `since`, `exid` + filters) come back as a `_warning` on the result —
+read it and tell the user what actually ran. Parameter reference: navi-core.
+
+**`-rebuild` is its own tool: `navi_config_rebuild`.** It is deliberately not a
+parameter on `navi_config_update` — MCP's `destructiveHint` is per-tool, so a
+boolean would either mark every ordinary refresh destructive or misreport the
+rebuild. `navi_config_update` stays honestly non-destructive; the rebuild is
+annotated for what it is.
+
+Two things make it unlike the other write-gated tools:
+
+- **`kind` is `assets` or `vulns` only** — no `full`. Rebuilding both is a CLI
+  command; from here it is two calls.
+- **`confirm=True` is not a second confirmation — it is navi's own.** navi
+  prompts with `click.confirm()` before dropping. Under MCP stdin is closed, so
+  that prompt would abort the command; the tool answers it, and the caller's
+  `confirm` supplies the answer. Narrate the drop and get real agreement before
+  passing it, because nothing downstream will ask again.
+
+It is never the answer to stale data — an ordinary `navi_config_update`
+refreshes without discarding anything. Surface the rebuild only for a table
+whose contents are known-bad (post-upgrade schema mismatch, an interrupted
+sync, duplicate rows an update won't clear). Name the table being dropped, warn
+that any scoping parameter on the same call narrows what comes back, and pass
+on the `_notice` about derived tables. Full guidance: navi-core's
+"`navi_config_rebuild`".
 
 Full per-command rationale, the one-time-setup command details, and the worked
 Route → Tag → Push → Verify remediation example live in
@@ -309,9 +356,19 @@ one resource read covers the check.)
   before proceeding, so the user can choose to refresh or proceed on
   slightly stale data: *"navi.db's newest vuln last_found is 12 days old —
   proceeding on current data; let me know if you'd like to refresh first."*
-- **Older than 30 days** → firm recommendation. Surface the full
-  `config update full` recommendation (as shown in the previous section)
-  and offer the targeted `navi_config_update(kind="vulns")` alternative.
+- **Older than 30 days** → firm recommendation. Offer the targeted
+  `navi_config_update(kind="vulns", days=30)` first — it's usually enough
+  for the workflow at hand. Reserve the `config update full` recommendation
+  (as shown in the previous section) for genuinely missing foundational
+  data.
+
+**Before reading staleness as a problem, ask how they sync.** A tenant on
+`since=` / `updated_at=` watermarks will show an old `MAX(last_found)` by
+design — `since` returns state *changes*, so a finding that has been open
+and unchanged for months never comes back and never gets its timestamp
+refreshed. That's a correctly-running incremental sync, not stale data. The
+fix, if the user wants the timestamps to move, is a periodic wider `days`
+sweep — not a full re-sync. See navi-core's "Choosing a sync window".
 
 **Ephemeral consideration:** on an empty or very stale DB, some targeted
 updates (`navi_config_update(kind="vulns")`, `...(kind="assets")`) may be

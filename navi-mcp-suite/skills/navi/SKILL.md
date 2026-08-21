@@ -1,19 +1,20 @@
 ---
 name: navi
 description: >
-  Entry point and router for the Tenable navi CLI skill set. Load this whenever
-  the user mentions navi, Tenable, TVM, Tenable.io, or anything involving asset
-  tagging, vulnerability management, certificate tracking, software inventory,
-  scan control, WAS/DAST reporting, ACR adjustment, or Tenable One dashboards.
-  This skill routes to domain skills (navi-core, navi-mcp, navi-troubleshooting,
-  navi-enrich, navi-acr, navi-explore, navi-export, navi-scan, navi-action,
-  navi-was) and covers cross-cutting content: the Executive Dashboard, the
-  natural-language master index, and the consolidated list of commands NOT
-  exposed through navi-mcp. Trigger on: "what can navi do?", "how do I use
-  navi?", "show me what navi sees", "give me a report from navi", "how do I
-  show this to leadership?", "is there a dashboard?", "what does all this data
-  look like together?", and any ambiguous navi request where the right domain
-  skill isn't obvious yet.
+  Entry point and router for the Tenable navi CLI skill set and the compliance
+  audit-authoring skills. Load this whenever the user mentions navi, Tenable,
+  TVM, or Tenable.io, or anything involving asset tagging, vulnerability
+  management, certificate tracking, software inventory, scan control, WAS/DAST,
+  ACR adjustment, Tenable One dashboards, or writing audit files.
+  Routes to navi-core, navi-mcp, navi-troubleshooting, navi-enrich, navi-acr,
+  navi-explore, navi-export, navi-scan, navi-action, navi-mail,
+  navi-remote-exec, navi-was, and the navi-audit set (navi-audit,
+  navi-audit-syntax, navi-audit-platforms, navi-audit-catalog). Also covers the
+  Executive Dashboard, the natural-language master index, and commands not
+  exposed through navi-mcp. Trigger on: "what can navi do?", "give me a report
+  from navi", "is there a dashboard?", "write an audit file", "create a custom
+  compliance check", "which controls cover this framework?", and any ambiguous
+  navi or Tenable request where the right domain skill isn't obvious.
 ---
 
 # Navi — Entry Point & Cross-Cutting Reference
@@ -47,6 +48,10 @@ exposed through MCP" list).
 | Emailing a report or file (`navi_action_mail`, double-gated) | **navi-mail** |
 | Running a command on / pushing a file to a remote Linux host (`navi_action_push`, double-gated) | **navi-remote-exec** |
 | Web Application Scanning (WAS / DAST), WAS findings, WAS tagging | **navi-was** |
+| Writing or editing a compliance audit file (`.audit`) from a requirement | **navi-audit** |
+| Audit file grammar: item structure, value_type, operators, conditionals, variables | **navi-audit-syntax** |
+| What can be checked on a platform, and the exact `check_type` wrapper tag | **navi-audit-platforms** |
+| Finding, reusing, or recombining controls Tenable already ships | **navi-audit-catalog** |
 | Building the Executive Dashboard for leadership reporting | This skill — see below |
 | Translating a paraphrased question into the right command | This skill — see Natural Language Index below |
 
@@ -83,11 +88,16 @@ any row, jump to the referenced skill.
 
 | User says | Tool call / Path | Skill |
 |---|---|---|
-| "install navi" | CLI: `pip install navi-pro` | navi-core |
+| "install navi" | CLI: `pip install navi-hostio` | navi-core |
 | "set up API keys" | CLI (out-of-band): `navi config keys --a <> --s <>` | navi-core |
 | "what version am I running" | `navi_explore_info(subcommand="version")` | navi-core |
 | "update my database" (targeted) | `navi_config_update(kind="vulns")` etc. | navi-core |
-| "update my database" (foundational) | CLI: `navi config update full` | navi-core |
+| "update my database" (foundational) | CLI: `navi config update full` (30d vulns / 90d assets by default) | navi-core |
+| "only sync what changed" / "incremental" / "nightly sync" | `navi_config_update(kind="vulns", since=<unix>)` + `(kind="assets", updated_at=<unix>)` | navi-core |
+| "my sync takes too long / keeps timing out" | Narrow it: `since=` → `days=` → `severity=` split | navi-core, navi-troubleshooting |
+| "sync one plugin / severity / state only" | `navi_config_update(kind="vulns", plugin_id=[N])` / `severity=` / `state=` | navi-core |
+| "the export finished but the data never landed" | `navi_config_update(kind="vulns", exid="<uuid>")` | navi-core |
+| "start over" / "rebuild my vulns table" / "wipe and re-sync" | `navi_config_rebuild(kind="vulns", confirm=True)` — destructive, write-gated | navi-core |
 | "build indexes / make navi faster" (8.5.31+) | CLI: `navi config optimize` | navi-core |
 | "populate EPSS data" | CLI: `navi config epss` | navi-core |
 | "set up SMTP for navi action mail" | CLI: `navi config smtp` | navi-action |
@@ -117,6 +127,7 @@ any row, jump to the referenced skill.
 | "show me exploitable vulns" | `navi_explore_data(subcommand="exploit")` | navi-explore |
 | "find assets with Log4j / Apache / [keyword]" | `navi_explore_data(subcommand="name", name=...)` or `output` | navi-explore |
 | "find by CISA KEV / IAVA / Bugtraq" | `navi_explore_data(subcommand="xrefs", xref_type=...)` | navi-explore |
+| "search by regex / pattern / wildcard" | `navi_explore_data(..., regexp=True)` — only `name`, `output`, `xrefs`, `plugin` | navi-explore |
 | "show all data for asset X" | `navi_explore_data(subcommand="asset", asset=...)` | navi-explore |
 | "custom SQL query" | `navi_explore_query(sql=...)` | navi-explore |
 | "list scanners / scans / policies / users / credentials" | `navi_explore_info(subcommand=...)` | navi-explore |
@@ -129,6 +140,7 @@ any row, jump to the referenced skill.
 |---|---|---|
 | "tag by plugin / CVE / port / route" | `navi_enrich_tag(category=..., value=..., <selector>=..., confirm=True)` | navi-enrich |
 | "tag via custom SQL" | `navi_enrich_tag(category=..., value=..., query=..., confirm=True)` | navi-enrich |
+| "tag by regex / pattern" | `navi_enrich_tag(..., regexp=True)` — needs a text selector (`plugin_output`, `plugin_name`, `cpe`, `xrefs`, `by_val`, `by_cat`) | navi-enrich |
 | "tag certs expiring in month X" | Certificate expiry tagging (stable value, rotating query) | navi-enrich |
 | "tag by software" | Software tagging (scale fork) | navi-enrich |
 | "refresh / cleanup a tag" | `navi_enrich_tag(..., remove=True, confirm=True)` — NOT delete-and-recreate | navi-enrich |
@@ -156,6 +168,7 @@ any row, jump to the referenced skill.
 | "export with ACR + AES" | `navi_export(subcommand="bytag", category=..., value=...)` | navi-export |
 | "export SLA breaches" | `navi_export(subcommand="failures")` | navi-export |
 | "custom CSV with specific columns" | `navi_export(subcommand="query", sql=...)` | navi-export |
+| "export only criticals / one plugin / KEV" | Tag first, then `navi_export(subcommand="bytag", ...)` — `vulns` takes no filters by design | navi-export |
 | "email the export" | CLI: `navi action mail --to ... --file ...` | navi-action |
 
 ### Scans
@@ -175,6 +188,35 @@ any row, jump to the referenced skill.
 | "scan a web app" | `navi_was(subcommand="scan", target=..., confirm=True)` | navi-was |
 | "which web apps have criticals" | `navi_explore_query(sql=...)` against `apps` | navi-was |
 | "upload a completed scan" | `navi_was(subcommand="upload", file=..., confirm=True)` | navi-was |
+
+### Compliance & audit files
+
+Reading compliance **results** is navi-explore / navi-export. Authoring the
+**audit files** that produce those results is the navi-audit skill set — a
+different job with different failure modes.
+
+| User says | Path | Skill |
+|---|---|---|
+| "show compliance results / STIG results" | `navi_explore_data(subcommand="audits")` | navi-explore |
+| "export compliance to CSV" | `navi_export(subcommand="compliance")` | navi-export |
+| "write an audit file for X" | Author + validate workflow | navi-audit |
+| "custom check that a file exists / a registry key is set" | Author + validate workflow | navi-audit |
+| "what's the wrapper tag for Cisco / AWS / Azure" | Confirmed tag table | navi-audit-platforms |
+| "what can Nessus check on this platform" | Per-platform check types | navi-audit-platforms |
+| "why won't my audit file load" | Validation checklist + `validate_audit.py` | navi-audit |
+| "does Tenable already ship a control for this" | Catalog search | navi-audit-catalog |
+| "which controls map to 800-53 / PCI / CIS" | `control_refs` query | navi-audit-catalog |
+| "combine CIS and STIG controls into one file" | Composition pattern | navi-audit-catalog |
+| "build / rebuild the audit catalog" | `build_catalog.py` against the warehouse | navi-audit-catalog |
+
+Two things worth knowing before routing here:
+
+- **Catalog search needs a build first.** `build_catalog.py` turns the signed
+  audit warehouse that ships with the platform into a local queryable catalog
+  (~107K controls). Without it, only the platform and syntax references are
+  available — still enough to author, just without reuse.
+- **Reuse beats authoring.** A shipped control is already tested and
+  framework-mapped. Search the catalog before writing a check by hand.
 
 ### Operations
 
@@ -330,10 +372,12 @@ plus per-call `confirm=True`. Load the dedicated skill before driving either.
 
 | Command | Purpose |
 |---|---|
-| `navi config update full` | Foundational database sync — hours on large tenants, hundreds of GB on first run |
+| `navi config update full` | Foundational database sync — defaults to 30d vulns / 90d assets; hours and hundreds of GB on a large tenant's first run |
 
 Claude surfaces this on apparent first-run, on stale-data symptoms, and
-after ACR/tagging writes. See navi-mcp's "Data freshness check" section.
+after ACR/tagging writes — and offers the targeted `navi_config_update(kind=...)`
+alternative first when that would cover the need. See navi-mcp's "Data
+freshness check".
 
 ### Out of scope for navi-mcp entirely
 
@@ -372,8 +416,18 @@ there for detail.
 | Fact | Canonical home |
 |---|---|
 | 30-minute tag/ACR propagation window | navi-core |
+| `days` vs. `since` / `updated_at`; the watermark sync pattern | navi-core ("Choosing a sync window") |
+| `since` is a state-change filter, not last-seen — needs periodic `days` reconciliation | navi-core + navi-troubleshooting |
+| `update full` default windows (30d vulns / 90d assets) | navi-core |
+| `navi_config_rebuild` drops a TABLE, not navi.db — and its download obeys your filters | navi-core |
+| `state` / `severity` are lists that REPLACE navi's default, not narrow it | navi-core |
+| `navi_config_update` per-kind allow-list; `category`/`value` and list-valued `plugin_id` | navi-core |
+| Full `config update` option set (`--exid`, `--state`, `--severity`, `--vpr_score`, `--plugin_id`, `--c`/`--v`, `--threads`) | navi-core |
 | 50K-asset scale fork for cert/software tagging | navi-core |
 | `remove=True` preserves tag UUID (don't delete-and-recreate) | navi-enrich |
+| `regexp=True` is global but text-selector-only; raises rather than matching literally | navi-enrich + navi-explore |
+| navi guards that only warn (xid without xrefs, histid without scanid) build an EMPTY tag and exit 0 | navi-enrich |
+| `export vulns` filters are closed by design — tag→bytag, or export query | navi-export |
 | DISTINCT path reality check (raw vs. true workload) | navi-core + the Executive Dashboard above |
 | ACR tier mapping (10/9/8/6/3/2) | navi-acr |
 | Tenable One Change Reasons (business/compliance/mitigation/development) | navi-acr |

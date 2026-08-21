@@ -1,16 +1,20 @@
 ---
 name: navi-enrich
 description: >
-  Asset tagging skill for Tenable navi CLI. Use for ANY request involving tagging
-  assets in Tenable VM: tag by plugin, CVE, CPE, CISA KEV, port, route, file, manual
-  UUID, scan ID, agent group, AD group, cross-references, custom SQL query, or
-  tag-on-tag derivation. Also covers adding assets from external sources
-  (navi_enrich_add). Critical patterns: ephemeral tagging with remove=True for
-  health tags (cred failures, slow scans, CISA KEV), tag UUID preservation
-  (do NOT delete-and-recreate), scale fork at 50K assets, 30-minute propagation
-  window for tags in the Tenable UI/API. Trigger on: "tag all assets", "create
-  a tag", "how do I tag", "enrich", "refresh a tag", "import assets". For
-  Asset Criticality Rating (ACR) adjustment, see navi-acr.
+  Asset tagging skill for Tenable navi CLI. Use for ANY request involving
+  tagging assets in Tenable VM: tag by plugin, CVE, CPE, CISA KEV, port,
+  route, file, manual UUID, scan ID, agent group, AD group, cross-references,
+  custom SQL query, or tag-on-tag derivation. Also covers adding assets from
+  external sources (navi_enrich_add). Critical patterns: ephemeral tagging
+  with remove=True for health tags, tag UUID preservation (do NOT delete-and-
+  recreate), scale fork at 50K assets, and the 30-minute propagation window.
+  Covers `regexp=True` for pattern matching — global across plugin_output,
+  plugin_name, cpe, xrefs, by_val and by_cat, raising elsewhere rather than
+  silently matching literally — the deprecated `plugin_regexp` alias, and the
+  guards for selectors navi would accept while building an empty tag (xid
+  without xrefs, histid without scanid). Trigger on: "tag all assets", "create
+  a tag", "how do I tag", "enrich", "refresh a tag", "regex tag", "tag by
+  pattern", "import assets". For ACR adjustment see navi-acr.
 ---
 
 # Navi Enrich — Tagging & Asset Enrichment
@@ -71,6 +75,20 @@ and `plugin_regexp` are modifiers that require `plugin`. `xid` requires
 `xrefs`. `histid` requires `scanid`. `require_both=True` requires both
 `parent_category` and `parent_value`.
 
+Two of those guards exist because **navi itself would not stop you.** Given
+`xid` without `xrefs`, or `histid` without `scanid`, navi prints a warning and
+then keeps going — it builds a tag with no selector and exits 0. A zero exit
+reads as success, so without a server-side raise you would get an empty tag
+reported as a completed one.
+
+The two are not enforced identically:
+
+- **`xid` without `xrefs` raises on every path**, `remove=True` included.
+- **`histid` without `scanid` raises only when `remove=False`.** On a
+  `remove=True` call it isn't checked — `histid` is folded into the "you
+  combined remove with a selector" warning instead, so the call runs. Supply
+  `scanid` yourself there rather than relying on the guard.
+
 Every tag call is write-gated. Examples show the tool form with `confirm=True`;
 in actual use, Claude narrates first and then asks for confirmation before
 invoking.
@@ -95,7 +113,56 @@ One primary selector per call. Full per-selector examples (tool + CLI) are in
 | `query` | a custom SELECT returning `asset_uuid` | `query=` |
 | `by_tag` / `by_cat` / `by_val` | derivation from existing tags | `by_tag=` etc. |
 | hierarchical | child→parent tag relationships | `parent_category=`, `parent_value=`, `require_both=` |
-| modes | ephemeral refresh / TONE tag | `remove=True` / `tone=True` |
+| modes | ephemeral refresh / TONE tag | `remove=True` / `tone=True` / `regexp=True` |
+
+---
+
+## `regexp=True` — pattern matching, and where it actually applies
+
+`regexp=True` maps to navi's `-regexp`, which flips the underlying SQL from
+`LIKE` to `REGEXP` for whichever **text** selector you used. It is a global
+switch, not a plugin-output feature.
+
+**Regexp-capable selectors — these six and no others:**
+
+`plugin_output` (with `plugin`) · `plugin_name` · `cpe` · `xrefs` · `by_val` · `by_cat`
+
+Passing `regexp=True` without one of them **raises**. That is deliberate:
+navi accepts `-regexp` everywhere and silently ignores it on the selectors
+that can't use it, which would hand you a literal-match tag wearing a
+pattern-match label. A tag that quietly matched nothing — or matched the
+wrong population — is worse than an error.
+
+```
+# Cross-reference tagging with alternation — one tag for KEV *or* IAVA
+navi_enrich_tag(category="Threat", value="KEV-or-IAVA",
+                xrefs="CISA|IAVA", regexp=True, confirm=True)
+```
+
+That call is the reason this matters: before `regexp` was a global parameter,
+regexp cross-reference tagging was unreachable through MCP entirely.
+
+### `plugin_regexp` is deprecated
+
+`plugin_regexp="<pattern>"` was the old spelling and only ever reached plugin
+**output**. It still works — it sets `--output` and `-regexp` together — but it
+returns a deprecation `_warning`. Write it the new way:
+
+```
+# Deprecated
+plugin=10863, plugin_regexp="Not After\\s*:\\s*Apr.*2026"
+
+# Preferred — identical behavior, no warning
+plugin=10863, plugin_output="Not After\\s*:\\s*Apr.*2026", regexp=True
+```
+
+### `xrefs` + `xid` + `regexp` — the pattern is ignored
+
+Supplying `xid` puts navi on a two-term `LIKE` branch that never reaches the
+`REGEXP` branch below it. The call succeeds, and the server returns a
+`_warning` telling you the pattern was treated literally. **Read that warning
+and tell the user** — the tag looks fine and is wrong. If you need a pattern
+across cross-references, use `xrefs` alone.
 
 ### Tagging use-case playbook
 
@@ -247,16 +314,22 @@ a ~30-min wait; on first creation the clear is unnecessary.
 
 **PATH A — under 50K (plugin regex):**
 
-`navi_enrich_tag(category="CertExpiry", value="ExpiringSoon", plugin=10863, plugin_regexp="Not After\s*:\s*Apr\s+\d{1,2}\s+[\d:]+\s+2026", confirm=True)`
+`navi_enrich_tag(category="CertExpiry", value="ExpiringSoon", plugin=10863, plugin_output="Not After\s*:\s*Apr\s+\d{1,2}\s+[\d:]+\s+2026", regexp=True, confirm=True)`
 
 ```bash
 navi enrich tag --c "CertExpiry" --v "ExpiringSoon" \
-  --plugin 10863 -regexp "Not After\s*:\s*Apr\s+\d{1,2}\s+[\d:]+\s+2026"
+  --plugin 10863 --output "Not After\s*:\s*Apr\s+\d{1,2}\s+[\d:]+\s+2026" -regexp
 ```
+
+> `-regexp` is a **boolean flag** — the pattern belongs to `--output`, not to
+> `-regexp` itself. Writing `-regexp "<pattern>"` makes click read the pattern
+> as a stray argument and the search text goes missing.
 
 **PATH B — over 50K (certs table — much faster):**
 
-First populate the certs table: `navi_config_update(kind="certificates")`
+First populate the certs table: `navi_config(kind="certificates")` — note
+`navi_config`, **not** `navi_config_update`; there is no `certificates` update
+kind (see navi-core).
 
 Then:
 
@@ -390,7 +463,8 @@ All `navi_enrich_tag` args:
 |--------|------|---------|
 | `plugin` | Plugin fired (int) | `plugin=104410` |
 | `plugin_output` | Text in output (requires `plugin`) | `plugin_output="splunk"` |
-| `plugin_regexp` | Regex in output (requires `plugin`) | `plugin_regexp="jenkins 2\.\d+"` |
+| `plugin_regexp` | *Deprecated* — regex in output (requires `plugin`). Use `plugin_output=` + `regexp=True` | `plugin_regexp="jenkins 2\.\d+"` |
+| `regexp` | LIKE → REGEXP for text selectors only (`plugin_output`, `plugin_name`, `cpe`, `xrefs`, `by_val`, `by_cat`); raises otherwise | `regexp=True` |
 | `plugin_name` | Text in plugin name | `plugin_name="Apache"` |
 | `cve` | CVE ID | `cve="CVE-2021-44228"` |
 | `cpe` | CPE string | `cpe="cpe:/a:apache"` |

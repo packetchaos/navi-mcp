@@ -5,6 +5,13 @@ tool surface, the one-time setup commands, and the worked MCP→CLI handoff
 example. The lean list + handoff rule are in SKILL.md; load this when you need
 the detail.
 
+> **`-rebuild` is now a tool.** `navi config update assets|vulns -rebuild` is
+> exposed as **`navi_config_rebuild`** — a separate, `destructiveHint=True`
+> tool rather than a flag on `navi_config_update`, so the non-destructive
+> refresh keeps an honest annotation. Write-gated plus `confirm=True`, where
+> the confirm doubles as the answer to navi's own `click.confirm()` prompt.
+> `kind` is `assets` or `vulns`; `full -rebuild` stays CLI-only. See navi-core.
+
 > **Now exposed (previously CLI-only):** `navi explore api` is now
 > `navi_explore_api` (GET free; POST/PUT write-gated); `navi config
 > certificates` is now `navi_config(kind="certificates")`; and `navi action
@@ -14,8 +21,10 @@ the detail.
 > the not-exposed set below — see the navi-mail and navi-remote-exec skills.
 
 > **Targeted-sync 4-minute ceiling:** the host's ~4-min tool-call cap on long
-> `navi_config_update(kind="vulns")` syncs (and the `days=N` / `--threads 1`
-> fallback) is documented in **navi-core** — its canonical home.
+> `navi_config_update(kind="vulns")` syncs — and every lever that fits a sync
+> under it (`since=` / `updated_at=` watermarks, `days=N`, `--severity` /
+> `--plugin_id` splits, `--threads 1`) — is documented in **navi-core**, its
+> canonical home.
 
 ## Commands not exposed through navi-mcp
 
@@ -89,6 +98,11 @@ Not exposed because:
 - An MCP tool call timing out, retrying, or being interrupted mid-sync
   causes real damage to the local database.
 
+It defaults to **30 days of vulns and 90 days of assets** — widen with
+`--days N`, or override per-export with `--since` (vulns) / `--updated_at`
+(assets). Because those two are per-export overrides on `update full`, one
+run can carry a wide asset history and a narrow vuln window.
+
 It is the single most important prerequisite for the entire navi-mcp
 toolchain. When navi.db is empty or stale, nothing else Claude does is
 reliable.
@@ -120,11 +134,16 @@ reliable.
 > navi config update full
 > ```
 >
-> On a large tenant, this can take hours and pull hundreds of GB the first
-> time. It's kept out of the MCP tool surface for exactly that reason.
-> For a lighter targeted refresh (vulns only, assets only, etc.), I can
-> run `navi_config_update(kind="vulns")` directly — that finishes in
-> minutes and is fine as a tool call. Which would you like?
+> On a large tenant this can take hours and pull hundreds of GB the first
+> time — that's why it's kept off the MCP tool surface. Note it defaults to
+> a 30-day vuln / 90-day asset window, so widen it with `--days` if you
+> need more history.
+>
+> For a catch-up you probably don't need it. I can run
+> `navi_config_update(kind="vulns", days=30)` right now — that finishes in
+> minutes as a tool call. If you'd rather sync only what's changed since
+> your last run, `since=<timestamp>` is smaller still. Which would you
+> like?
 
 Claude does NOT nag — the recommendation surfaces at the points above,
 not on every session or every message.

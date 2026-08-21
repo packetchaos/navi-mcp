@@ -16,6 +16,86 @@ CORRECTNESS (A14 — 23 verified bugs; root cause: positional navi args sent as
     User ID (not email); dropped `agent` and `exclusion` (not real subcommands).
   • navi_config_update: dropped invalid `certificates`; added `fixed`, `plugins`
     (plugins requires --size).
+COVERAGE (2026-08-21 — `config update` scoping flags, verified against the
+navi --help tree for assets/vulns/full):
+  • navi_config_update now exposes the full export-scoping surface instead of
+    days/size only: --exid, --threads, --c/--v (category+value), --state,
+    --severity, --vpr_score/--operator, --plugin_id (repeatable), --since,
+    --updated_at. Each flag is allow-listed PER KIND (_UPDATE_FLAGS); passing
+    one to a kind that ignores it raises, so a filter can never degrade into a
+    silent full-scope sync. Combinations navi resolves one way (since/updated_at
+    beating days; exid ignoring filters) return a `_warning`. cli_hint now
+    echoes the real scoped invocation rather than a canned full sync.
+    `full` stays CLI-only — it deletes navi.db.
+CORRECTNESS (2026-08-21 — navi_enrich_tag cross-reference / regexp, verified
+against navi-pro 8.6.4 `navi/plugins/enrich.py`):
+  • `--xrefs` / `--xid` confirmed correct (`--xref` singular is NOT a navi
+    option; navi's own tag_rules.run_rules_now() emits it and is broken).
+    `--xref-id` exists only as a click alias of `--xid`.
+  • xid-without-xrefs now raises on EVERY path, remove=True included (it was
+    guarded only when remove=False). navi's own check click.echo()s without
+    exiting, so navi builds an EMPTY tag and returns 0 — which _raise_on_error
+    reads as success. This is the one place the tool must be stricter than navi.
+  • `-regexp` is GLOBAL in navi (plugin output, plugin name, cpe, xrefs, by_val,
+    by_cat), not plugin-only. Added `regexp: bool`; passing it without a
+    regexp-capable selector raises rather than silently degrading to LIKE.
+    `plugin_regexp` kept as a deprecated alias that warns. This makes regexp
+    cross-reference tags (xrefs="CISA|IAVA") reachable through MCP at all.
+  • xrefs+xid+regexp returns a `_warning`: navi's xid branch is a two-term LIKE
+    that never reaches the REGEXP branch.
+COVERAGE (2026-08-21 — the SAME -regexp gap swept across every navi command
+that declares it; six commands total carry xref/regexp options, found by AST-
+walking the 8.6.4 wheel rather than grepping):
+  • navi_explore_data gained `regexp: bool`, honoured for the four subcommands
+    navi actually supports (name, output, xrefs, plugin) and raising for the
+    rest. Previously -regexp was unreachable on ALL of them.
+  • navi_explore_data(subcommand='plugin') gained the `--out` text filter —
+    it was dropped entirely, so "assets where plugin N reported <text>" had no
+    tool path. Note navi spells it `--out` here and `--output` on `enrich tag`.
+    -regexp on `plugin` only switches the --out search, so regexp without
+    output raises.
+  • explore data xrefs+xid+regexp gets the same literal-LIKE `_warning` as the
+    enrich tag path.
+  • Remaining xref/regexp site is `export vulns` — see BY DESIGN below.
+BY DESIGN (not a gap): `navi export vulns` also accepts
+--c/--v/--severity/--plugin/--name/--output/--cve/--xrefs/-regexp, and
+navi_export exposes none of them for subcommand='vulns'. The intended navi
+pattern is TAG THEN EXPORT BY TAG — narrow the population once with
+navi_enrich_tag (which has the full selector surface, xrefs included), then
+navi_export(subcommand='bytag', category=…, value=…). bytag is also the only
+export carrying ACR + AES, so the tagged route yields a strictly richer CSV
+than a filtered `export vulns` would. For a one-off slice that does not deserve
+a tag, navi_export(subcommand='query', sql=…) already covers any filter those
+flags express — including xrefs (`WHERE vulns.xrefs LIKE '%CISA%'`).
+COVERAGE (2026-08-21 — `-rebuild`, verified against the navi dev checkout at
+C:\\Users\\packe\\claud_navi\\navi, navi/plugins/config.py):
+  • New tool navi_config_rebuild (assets|vulns) wrapping
+    `navi config update <kind> -rebuild`. Kept OUT of navi_config_update because
+    MCP's destructiveHint is per-tool: one flag on the existing tool would have
+    to label every ordinary refresh destructive, or lie about the rebuild.
+    Gated NAVI_MCP_ALLOW_WRITES=1 + confirm=True, destructiveHint=True.
+  • run_navi() gained `stdin_text`. navi's rebuild_tables() calls click.confirm()
+    before dropping; with stdin at DEVNULL click hits EOF and aborts with exit 1,
+    so `-rebuild` was simply unusable from MCP. The tool now answers that prompt
+    with "y" — which is precisely why confirm=True is mandatory first: the
+    caller's confirm IS the answer being given to navi. Verified end-to-end
+    against a real click.confirm subprocess.
+  • Post-rebuild `_notice` carries navi's own rebuild_reminder in MCP terms:
+    certs/software/vuln_route/vuln_paths are derived from assets+vulns and go
+    stale the moment those tables are dropped.
+  • `_build_update_call()` extracted so the destructive path shares the safe
+    path's per-kind allow-list, validation and warnings — the two cannot drift.
+  • `full` stays CLI-only, but its docstring was corrected: it no longer deletes
+    navi.db unconditionally (that moved to `-rebuild`); the hours-long runtime
+    is now the only reason it is not exposed.
+  • state/severity now match navi's `multiple=True` arity (D-open-1 closed):
+    both accept a LIST and repeat the flag, on the update and rebuild paths
+    alike. A bare string is still accepted as a one-element list, so existing
+    callers and scalar-passing models keep working. Empty list raises; order is
+    preserved and duplicates collapse. Documented at the call site: supplying
+    either flag REPLACES navi's default (open+reopened for state, all five for
+    severity) rather than narrowing it — so 'everything including fixed' means
+    naming all three states explicitly.
   • navi_config: `sla` now runs `config sla calculate` (bare was a no-op group);
     added `certificates` (the real cert-table command, plugin 10863).
   • navi_action_cancel: now passes the REQUIRED export UUID.
@@ -52,8 +132,10 @@ DEFERRED (documented at each site — request to add):
 ================================================================================
 
 Exposes:
-  Tools (19):
-    navi_config_update      targeted DB refresh
+  Tools (20):
+    navi_config_update      targeted DB refresh (never drops)
+    navi_config_rebuild     DROP + re-create a navi.db table — DESTRUCTIVE,
+                            write-gated + confirm-gated
     navi_config             software / sla / url / certificates setup
     navi_explore_query      SQL against navi.db — reads free, writes confirm
     navi_explore_data       17 explore data subcommands (reads navi.db)
@@ -178,12 +260,20 @@ async def run_navi(
     *,
     timeout: float = MCP_CALL_BUDGET,
     cli_hint: str | None = None,
+    stdin_text: str | None = None,
 ) -> dict:
     """
     Execute `navi <args>` inside NAVI_WORKDIR and return a structured result.
 
     `cli_hint`, if given, is appended to the timeout error so the user knows the
     exact terminal command to run when an operation exceeds the MCP call budget.
+
+    `stdin_text` answers a navi command that prompts interactively. Stdin is
+    DEVNULL by default, which is what keeps an unexpected prompt from hanging the
+    call — click sees EOF and aborts with a non-zero exit instead. Pass this ONLY
+    where the prompt is known, expected, and already gated on the MCP side
+    (currently just `config update … -rebuild`); never to make an unforeseen
+    prompt go away, because that answers a question you have not read.
 
     Uses blocking subprocess.run in a thread (the async variant deadlocks on
     Windows when a Python process spawns another Python entry-point exe).
@@ -200,7 +290,8 @@ async def run_navi(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            input=stdin_text if stdin_text is not None else None,
+            stdin=subprocess.DEVNULL if stdin_text is None else None,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
@@ -327,7 +418,181 @@ UpdateKind = Literal[
     "assets", "vulns", "agents", "compliance",
     "route", "paths", "was", "fixed", "plugins",
 ]
-_UPDATE_DAYS_OK = {"assets", "vulns", "fixed"}
+
+UpdateState = Literal["open", "reopened", "fixed"]
+UpdateSeverity = Literal["critical", "high", "medium", "low", "info"]
+VprOperator = Literal["gte", "gt", "lt", "lte"]
+
+# Which optional flags each `config update` slice actually accepts, per the navi
+# --help tree. Anything a caller supplies that is NOT listed for their kind
+# raises, so a filter never silently evaporates into a full-scope sync (the old
+# behaviour for everything except --days).
+#
+#   assets : --days --exid --threads --c --v --updated_at
+#   vulns  : --days --exid --threads --c --v --state --severity --vpr_score
+#            --operator --plugin_id --since
+#   fixed  : --days                     (historical contract; unchanged)
+#   plugins: --size
+#   agents / compliance / route / paths / was: no filters at all
+_UPDATE_FLAGS: dict[str, set[str]] = {
+    "assets": {"days", "exid", "threads", "category", "value", "updated_at"},
+    "vulns": {
+        "days", "exid", "threads", "category", "value", "state", "severity",
+        "vpr_score", "operator", "plugin_id", "since",
+    },
+    "fixed": {"days"},
+    "plugins": {"size"},
+    "agents": set(),
+    "compliance": set(),
+    "route": set(),
+    "paths": set(),
+    "was": set(),
+}
+
+
+# `-rebuild` exists on assets, vulns and full. `full` is not exposed as a tool
+# (it always blows the call budget), so rebuilding both tables from here is two
+# calls; the docstring points at the CLI one-shot.
+RebuildKind = Literal["assets", "vulns"]
+
+
+def _as_flag_list(name: str, val) -> list[str] | None:
+    """
+    Normalise a navi `multiple=True` option to an ordered, de-duplicated list.
+
+    Accepts a bare string as well as a list, so a caller passing state='open'
+    still lands correctly instead of tripping a schema error. Duplicates are
+    dropped (repeating a value changes nothing in navi) while order is kept, so
+    the argv stays a faithful, minimal echo of what was asked for.
+    """
+    if val is None:
+        return None
+    vals = [val] if isinstance(val, str) else list(val)
+    if not vals:
+        raise NaviError(
+            f"`{name}` was an empty list — omit it to accept navi's default, or "
+            f"pass at least one value."
+        )
+    ordered: list[str] = []
+    for v in vals:
+        if v not in ordered:
+            ordered.append(v)
+    return ordered
+
+
+def _build_update_call(
+    kind: str,
+    *,
+    days: int | None = None,
+    size: int | None = None,
+    exid: str | None = None,
+    threads: int | None = None,
+    category: str | None = None,
+    value: str | None = None,
+    state: list[str] | str | None = None,
+    severity: list[str] | str | None = None,
+    vpr_score: float | None = None,
+    operator: str | None = None,
+    plugin_id: list[int] | None = None,
+    since: int | None = None,
+    updated_at: int | None = None,
+) -> tuple[list[str], list[str], str | None]:
+    """
+    Validate a `config update` invocation and build its argv.
+
+    Shared by navi_config_update and navi_config_rebuild so the two can never
+    drift on which flags a kind accepts — the destructive path gets exactly the
+    same allow-list and the same warnings as the safe one.
+
+    Returns (argv, warnings, cli_hint).
+    """
+    state = _as_flag_list("state", state)
+    severity = _as_flag_list("severity", severity)
+
+    supplied = {
+        name: val
+        for name, val in (
+            ("days", days), ("size", size), ("exid", exid), ("threads", threads),
+            ("category", category), ("value", value), ("state", state),
+            ("severity", severity), ("vpr_score", vpr_score), ("operator", operator),
+            ("plugin_id", plugin_id), ("since", since), ("updated_at", updated_at),
+        )
+        if val is not None
+    }
+
+    allowed = _UPDATE_FLAGS[kind]
+    rejected = sorted(set(supplied) - allowed)
+    if rejected:
+        raise NaviError(
+            f"kind='{kind}' does not accept {rejected}. "
+            f"Accepted for this kind: {sorted(allowed) or '(no scoping flags)'}."
+        )
+
+    if threads is not None and not 1 <= threads <= 20:
+        raise NaviError("`threads` must be between 1 and 20.")
+    if (category is None) != (value is None):
+        raise NaviError(
+            "`category` and `value` are navi's --c/--v tag pair — supply both or neither."
+        )
+    if operator is not None and vpr_score is None:
+        raise NaviError("`operator` only has meaning alongside `vpr_score`.")
+    if plugin_id is not None and not plugin_id:
+        raise NaviError("`plugin_id` was an empty list — omit it, or pass at least one ID.")
+
+    if kind == "plugins":
+        size = size if size is not None else 10000
+        if not 1000 <= size <= 10000:
+            raise NaviError("kind='plugins' requires size between 1000 and 10000.")
+        args = ["config", "update", "plugins", "--size", str(size)]
+    else:
+        args = ["config", "update", kind]
+        if days is not None:
+            args.extend(["--days", str(days)])
+        if exid is not None:
+            args.extend(["--exid", exid])
+        if threads is not None:
+            args.extend(["--threads", str(threads)])
+        if category is not None and value is not None:
+            args.extend(["--c", category, "--v", value])
+        for st in state or []:
+            args.extend(["--state", st])
+        for sv in severity or []:
+            args.extend(["--severity", sv])
+        if vpr_score is not None:
+            args.extend(["--vpr_score", str(vpr_score)])
+        if operator is not None:
+            args.extend(["--operator", operator])
+        for pid in plugin_id or []:
+            args.extend(["--plugin_id", str(pid)])
+        if since is not None:
+            args.extend(["--since", str(since)])
+        if updated_at is not None:
+            args.extend(["--updated_at", str(updated_at)])
+
+    # Surface combinations navi accepts but silently resolves in one direction.
+    warnings: list[str] = []
+    if days is not None and since is not None:
+        warnings.append("`since` overrides `days` for the vuln export — `days` is ignored.")
+    if days is not None and updated_at is not None:
+        warnings.append("`updated_at` overrides `days` for the asset export — `days` is ignored.")
+    if exid is not None:
+        ignored = sorted(set(supplied) - {"exid", "threads"})
+        if ignored:
+            warnings.append(
+                f"`exid` downloads an export that already exists, so {ignored} do not "
+                f"re-scope it — the chunks come back exactly as that export was built."
+            )
+
+    # Echo the real invocation as the CLI fallback, so a timeout hands the user
+    # the same scoped command rather than a generic full sync.
+    cli_hint = None
+    if kind in {"assets", "vulns", "fixed", "plugins"}:
+        hint_args = list(args)
+        if kind != "plugins" and threads is None:
+            hint_args.extend(["--threads", "1"])
+        cli_hint = shlex.join(["navi", *hint_args])
+
+    return args, warnings, cli_hint
 
 
 @mcp.tool(
@@ -340,6 +605,17 @@ async def navi_config_update(
     kind: UpdateKind,
     days: int | None = None,
     size: int | None = None,
+    exid: str | None = None,
+    threads: int | None = None,
+    category: str | None = None,
+    value: str | None = None,
+    state: list[UpdateState] | UpdateState | None = None,
+    severity: list[UpdateSeverity] | UpdateSeverity | None = None,
+    vpr_score: float | None = None,
+    operator: VprOperator | None = None,
+    plugin_id: list[int] | None = None,
+    since: int | None = None,
+    updated_at: int | None = None,
 ) -> dict:
     """
     Refresh one slice of the local navi.db from the Tenable platform.
@@ -355,48 +631,163 @@ async def navi_config_update(
       fixed        — fixed-vuln data for SLA processing (needed by export failures)
       plugins      — populate the full Tenable plugin DB (REQUIRES `size`)
 
-    days (assets/vulns/fixed only) — limits the lookback window. Passing it for
-    any other kind raises so the caller knows their intent didn't land. `days`
-    is also the primary lever for fitting a large vulns sync under the call
-    budget below.
+    SCOPING FLAGS. Each is accepted only by the kinds that actually support it;
+    passing one to a kind that ignores it raises, so your intent never lands as a
+    silent full sync. Scope is enforced by the Tenable EXPORT, not filtered after
+    download — a narrow filter is the cheapest way to stay under the call budget.
 
-    size (plugins only) — page size, 1000–10000. Required for kind='plugins'.
+      days        (assets/vulns/fixed) lookback window in days
+      exid        (assets/vulns) download an EXISTING export by its UUID instead
+                  of requesting a new one; filters do not re-scope it
+      threads     (assets/vulns) 1–20 download workers; lower = slower but
+                  gentler on a rate-limited or flaky tenant
+      category +  (assets/vulns) navi's --c/--v pair: restrict the sync to assets
+      value       carrying one tag. Always supply BOTH.
+      state       (vulns) one or more of open | reopened | fixed
+      severity    (vulns) one or more of critical | high | medium | low | info
+
+        Both are repeatable, and both REPLACE A DEFAULT rather than narrowing
+        one. navi defaults `--state` to open+reopened (NOT fixed) and
+        `--severity` to all five. So state=['fixed'] gives you fixed ONLY, and
+        pulling everything including fixed means naming all three:
+        state=['open','reopened','fixed']. Omit the parameter to keep navi's
+        default. A bare string is accepted as a one-element list.
+
+      vpr_score + (vulns) VPR threshold and its comparison operator
+      operator    (gte | gt | lt | lte)
+      plugin_id   (vulns) one or more plugin IDs — the tightest possible sync
+                  when you only care about a single detection
+      since       (vulns) unix timestamp; pulls state changes after it and
+                  OVERRIDES days
+      updated_at  (assets) unix timestamp; pulls assets updated after it and
+                  OVERRIDES days
+      size        (plugins) page size, 1000–10000
 
     NOTE — MCP call ceiling. A single tool call is capped at ~4 min by the host.
     On large tenants kind='vulns' (sometimes 'assets'/'plugins') exceeds this and
     will time out here even though it would succeed at the CLI. Mitigations:
-      • narrow:   days=N            (assets/vulns/fixed)
-      • CLI:      navi config update vulns --threads 1
+      • narrow:   days=N, since=…, severity=…, plugin_id=[…], category+value
+      • throttle: threads=1  (also the CLI fallback this tool prints on timeout)
       • indexes:  navi config optimize   (run once; makes later work fast)
 
+    This tool NEVER drops anything — an update merges into the existing table.
+    To start a table over from empty, use navi_config_rebuild (destructive,
+    write-gated, confirm-gated).
+
     To populate the certificate table, use navi_config(kind='certificates').
-    The foundational full sync (`navi config update full`) is intentionally
-    CLI-only — it can pull hundreds of GB and run for hours.
+    The foundational full sync (`navi config update full`) stays CLI-only: it is
+    a 30-day vuln + 90-day asset pull that runs for hours, far past the call
+    budget. (It no longer deletes navi.db first — that is now opt-in via
+    `-rebuild` — but the runtime is still the blocker.)
     """
-    if days is not None and kind not in _UPDATE_DAYS_OK:
-        raise NaviError(
-            f"--days is only supported for kind in {sorted(_UPDATE_DAYS_OK)}, not '{kind}'."
-        )
+    args, warnings, cli_hint = _build_update_call(
+        kind, days=days, size=size, exid=exid, threads=threads, category=category,
+        value=value, state=state, severity=severity, vpr_score=vpr_score,
+        operator=operator, plugin_id=plugin_id, since=since, updated_at=updated_at,
+    )
+    result = await run_navi(args, cli_hint=cli_hint)
+    _raise_on_error(result, f"navi config update {kind}")
+    if warnings:
+        result["_warning"] = " ".join(warnings)
+    return result
 
-    if kind == "plugins":
-        size = size if size is not None else 10000
-        if not 1000 <= size <= 10000:
-            raise NaviError("kind='plugins' requires size between 1000 and 10000.")
-        args = ["config", "update", "plugins", "--size", str(size)]
-    else:
-        if size is not None:
-            raise NaviError("`size` is only valid for kind='plugins'.")
-        args = ["config", "update", kind]
-        if days is not None:
-            args.extend(["--days", str(days)])
 
-    cli_map = {
-        "vulns": "navi config update vulns --threads 1",
-        "assets": "navi config update assets --threads 1",
-        "plugins": f"navi config update plugins --size {size or 10000}",
-    }
-    result = await run_navi(args, cli_hint=cli_map.get(kind))
-    return _raise_on_error(result, f"navi config update {kind}")
+@mcp.tool(
+    annotations=_anno(
+        title="REBUILD a navi.db table (DESTRUCTIVE)",
+        readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True,
+    )
+)
+async def navi_config_rebuild(
+    kind: RebuildKind,
+    confirm: bool = False,
+    days: int | None = None,
+    exid: str | None = None,
+    threads: int | None = None,
+    category: str | None = None,
+    value: str | None = None,
+    state: list[UpdateState] | UpdateState | None = None,
+    severity: list[UpdateSeverity] | UpdateSeverity | None = None,
+    vpr_score: float | None = None,
+    operator: VprOperator | None = None,
+    plugin_id: list[int] | None = None,
+    since: int | None = None,
+    updated_at: int | None = None,
+) -> dict:
+    """
+    DESTRUCTIVE. Run `navi config update <kind> -rebuild`: DROP the local table,
+    re-create it empty, then download into it.
+
+    This is a separate tool from navi_config_update precisely so the destructive
+    annotation is honest — navi_config_update never drops anything, this always
+    does. It requires NAVI_MCP_ALLOW_WRITES=1 and confirm=True.
+
+    WHAT IS DESTROYED — the local navi.db table only:
+      assets  — every asset record you have cached
+      vulns   — every finding record you have cached
+    NOTHING in Tenable Vulnerability Management is changed or deleted. What is
+    lost is your local cache and the download time it cost to build it; on a
+    large tenant that is hours.
+
+    DERIVED TABLES GO STALE. certs, software, vuln_route and vuln_paths are all
+    computed from asset/vuln data, so after a rebuild they describe records that
+    no longer exist. Refresh them with navi_config(kind='certificates'),
+    navi_config(kind='software'), navi_config_update(kind='route') and
+    navi_config_update(kind='paths'). The returned `_notice` repeats this.
+
+    WHEN THIS IS THE RIGHT TOOL: a schema mismatch after a navi upgrade, a
+    partially-downloaded table from an interrupted sync, or duplicate/stale rows
+    a normal update will not clear (an ordinary update merges into the existing
+    table rather than replacing it). If you only want fresher data, use
+    navi_config_update — it is not destructive and is almost always what is
+    wanted.
+
+    All the scoping flags behave exactly as in navi_config_update, and apply to
+    the download that follows the drop — so `kind='vulns', severity=['critical']`
+    leaves you with a vulns table containing ONLY criticals. That is a much
+    smaller database than you started with, not merely a fresher one. Mind that
+    `state` and `severity` REPLACE navi's defaults: a rebuild with
+    state=['open'] silently discards your reopened findings too, because the
+    old table is already gone by the time the narrowed download runs.
+
+    Rebuilding BOTH tables in one shot is `navi config update full -rebuild` at
+    the CLI; `full` is not exposed here because it always exceeds the call
+    budget. Two calls (assets, then vulns) do the same thing from here.
+
+    navi prompts interactively to confirm the drop. Under MCP stdin is closed, so
+    that prompt would abort the command — this tool answers it for you, which is
+    exactly why confirm=True is required first: your confirm IS the answer navi
+    is asking for.
+    """
+    _require_writes("navi_config_rebuild")
+    _require_confirm("navi_config_rebuild", confirm)
+
+    args, warnings, cli_hint = _build_update_call(
+        kind, days=days, exid=exid, threads=threads, category=category,
+        value=value, state=state, severity=severity, vpr_score=vpr_score,
+        operator=operator, plugin_id=plugin_id, since=since, updated_at=updated_at,
+    )
+    args.append("-rebuild")
+    if cli_hint:
+        cli_hint = f"{cli_hint} -rebuild"
+
+    # navi's rebuild_tables() calls click.confirm() before dropping. With stdin
+    # at DEVNULL click raises Abort and the command exits 1 without touching the
+    # table, so the flag is unusable from MCP unless we answer the prompt. The
+    # gates above (write gate + confirm=True) are what earn that "y".
+    result = await run_navi(args, cli_hint=cli_hint, stdin_text="y\n")
+    _raise_on_error(result, f"navi config update {kind} -rebuild")
+
+    dropped = "assets" if kind == "assets" else "vulns"
+    result["_notice"] = (
+        f"The {dropped} table was DROPPED, re-created, and re-downloaded. Tables "
+        f"derived from it are now stale — refresh with navi_config(kind='certificates'), "
+        f"navi_config(kind='software'), navi_config_update(kind='route') and "
+        f"navi_config_update(kind='paths')."
+    )
+    if warnings:
+        result["_warning"] = " ".join(warnings)
+    return result
 
 
 # `certificates` added (the real cert command). `sla` now targets `calculate`.
@@ -551,6 +942,11 @@ async def _explore_query_write(sql: str) -> dict:
         conn.close()
 
 
+# navi honours `-regexp` on exactly four `explore data` subcommands (verified in
+# navi-pro 8.6.4 navi/plugins/explore.py): name, output, xrefs, and plugin — and
+# on `plugin` only for the `--out` text, never the plugin ID.
+_EXPLORE_REGEXP_SUBS = {"name", "output", "xrefs", "plugin"}
+
 ExploreDataSub = Literal[
     "cve", "exploit", "name", "output", "xrefs",
     "docker", "webapp", "creds", "scantime", "software",
@@ -577,6 +973,7 @@ async def navi_explore_data(
     xref_id: str | None = None,
     port: int | None = None,
     minutes: int | None = None,
+    regexp: bool = False,
 ) -> dict:
     """
     Run a `navi explore data` subcommand. Reads navi.db — no API calls.
@@ -593,15 +990,34 @@ async def navi_explore_data(
       scantime   minutes     assets that scanned > N minutes
       software   (none)      requires navi_config(kind='software') first
       audits     (none)      compliance results
-      plugin     plugin_id   single plugin lookup
+      plugin     plugin_id   single plugin lookup; optional `output` narrows to
+                             assets whose output for THAT plugin contains the text
       port       port        assets with a vuln on a port
       route      (none)      vuln_route table
       paths      (none)      vuln_paths table
       asset      asset       all data for one asset (IP or UUID)
       db_info    table       schema inspector (prefer navi://schema/{table})
 
+    regexp=True maps to navi's `-regexp`, switching the underlying SQL from LIKE
+    to REGEXP. Only four subcommands honour it — `name`, `output`, `xrefs`, and
+    `plugin` (there only for the `output` text, never for the plugin ID itself).
+    Anywhere else navi accepts the flag and ignores it, so this tool raises
+    instead of handing back a literal match that looks like a pattern match.
+
     For freeform SELECT, prefer navi_explore_query (direct sqlite, faster).
     """
+    if regexp and subcommand not in _EXPLORE_REGEXP_SUBS:
+        raise NaviError(
+            f"regexp=True is not supported for subcommand='{subcommand}'. navi "
+            f"honours -regexp only for {sorted(_EXPLORE_REGEXP_SUBS)}."
+        )
+    if regexp and subcommand == "plugin" and not output:
+        raise NaviError(
+            "subcommand='plugin' with regexp=True also needs `output`: navi's "
+            "-regexp there only switches the --out text search, and is a no-op "
+            "when no output text is given."
+        )
+
     if subcommand == "cve":
         if not cve:
             raise NaviError("subcommand='cve' requires `cve`.")
@@ -611,18 +1027,36 @@ async def navi_explore_data(
     if subcommand == "name":
         if not name:
             raise NaviError("subcommand='name' requires `name`.")
-        return _raise_on_error(await run_navi(["explore", "data", "name", name]), "explore data name")
+        args = ["explore", "data", "name", name]
+        if regexp:
+            args.append("-regexp")
+        return _raise_on_error(await run_navi(args), "explore data name")
     if subcommand == "output":
         if not output:
             raise NaviError("subcommand='output' requires `output`.")
-        return _raise_on_error(await run_navi(["explore", "data", "output", output]), "explore data output")
+        args = ["explore", "data", "output", output]
+        if regexp:
+            args.append("-regexp")
+        return _raise_on_error(await run_navi(args), "explore data output")
     if subcommand == "xrefs":
         if not xref_type:
             raise NaviError("subcommand='xrefs' requires `xref_type`.")
         args = ["explore", "data", "xrefs", xref_type]
         if xref_id:
             args.extend(["--xid", xref_id])
-        return _raise_on_error(await run_navi(args), "explore data xrefs")
+        if regexp:
+            args.append("-regexp")
+        result = _raise_on_error(await run_navi(args), "explore data xrefs")
+        if regexp and xref_id:
+            # Same shape as `enrich tag`: navi's xid branch is a two-term literal
+            # LIKE and never reaches the REGEXP branch below it.
+            result["_warning"] = (
+                "regexp=True was passed with both xref_type and xref_id. navi "
+                "matches BOTH terms with a literal LIKE when an xref_id is given "
+                "and never reaches the REGEXP branch, so the pattern was treated "
+                "as literal text."
+            )
+        return result
     if subcommand == "docker":
         return _raise_on_error(await run_navi(["explore", "data", "docker"]), "explore data docker")
     if subcommand == "webapp":
@@ -640,7 +1074,13 @@ async def navi_explore_data(
     if subcommand == "plugin":
         if plugin_id is None:
             raise NaviError("subcommand='plugin' requires `plugin_id`.")
-        return _raise_on_error(await run_navi(["explore", "data", "plugin", str(plugin_id)]), "explore data plugin")
+        args = ["explore", "data", "plugin", str(plugin_id)]
+        if output:
+            # navi calls this `--out` here (not `--output` as on `enrich tag`).
+            args.extend(["--out", output])
+        if regexp:
+            args.append("-regexp")
+        return _raise_on_error(await run_navi(args), "explore data plugin")
     if subcommand == "port":
         if port is None:
             raise NaviError("subcommand='port' requires `port`.")
@@ -776,7 +1216,7 @@ async def navi_enrich_tag(
     description: str | None = None,
     plugin: int | None = None,
     plugin_output: str | None = None,
-    plugin_regexp: str | None = None,
+    plugin_regexp: str | None = None,  # DEPRECATED — use regexp=True
     plugin_name: str | None = None,
     cve: str | None = None,
     cpe: str | None = None,
@@ -798,6 +1238,7 @@ async def navi_enrich_tag(
     by_cat: str | None = None,
     parent_category: str | None = None,  # --cc
     parent_value: str | None = None,     # --cv
+    regexp: bool = False,                # -regexp
     require_both: bool = False,          # -all
     tone: bool = False,                  # -tone
     remove: bool = False,                # -remove
@@ -818,9 +1259,28 @@ async def navi_enrich_tag(
       query — raw SELECT returning asset_uuid
       by_tag / by_val / by_cat — derive from existing tags
 
-    plugin_output and plugin_regexp are MODIFIERS to plugin.
+    plugin_output is a MODIFIER to plugin.
     Hierarchical: parent_category + parent_value; require_both=True for AND (-all).
     tone=True creates a TONE tag.
+
+    REGEXP MATCHING — `regexp=True` maps to navi's `-regexp` flag, which is
+    GLOBAL, not plugin-specific: it switches the underlying SQL from LIKE to
+    REGEXP for whichever text selector you used. In navi 8.6.4 that is:
+        plugin_output (with plugin) · plugin_name · cpe · xrefs · by_val · by_cat
+    Passing regexp=True with any other selector raises, because navi would
+    silently ignore it and hand back a literal-match tag you did not ask for.
+    Example — tag every asset with a CISA *or* IAVA cross-reference:
+        navi_enrich_tag(category="Intel", value="Advisories",
+                        xrefs="CISA|IAVA", regexp=True, confirm=True)
+    `plugin_regexp` is the DEPRECATED spelling of this (it only ever reached
+    plugin output). It still works — it sets `--output` and `-regexp` — but it
+    returns a deprecation `_warning`; prefer plugin_output=… + regexp=True.
+
+    CROSS-REFERENCES — `xrefs` is navi's `--xrefs` (plural; `--xref` is not a
+    real navi option). `xid` refines it and REQUIRES `xrefs`: navi itself only
+    prints a warning and then carries on to build an empty tag with exit code 0,
+    so this tool raises instead, on every path including remove=True. Note that
+    supplying `xid` puts navi on a two-term LIKE branch that ignores `-regexp`.
 
     EPHEMERAL REFRESH — `remove=True` is a CLEAR operation, NOT a reassignment.
     In navi, `-remove` strips the tag from EVERY asset currently carrying it
@@ -860,6 +1320,36 @@ async def navi_enrich_tag(
     #     independent jobs in one call, which only adds/updates against the
     #     CURRENT membership rather than doing a clean refresh (see combine_warning).
     # When remove=False, exactly one selector is required (normal tag create).
+    # `xid` alone is checked on EVERY path, remove=True included. navi's own
+    # guard (enrich.py: "You must supply a Cross Reference Type using --xrefs
+    # option") only click.echo()s — it does NOT exit — so navi goes on to build a
+    # tag with no selector and returns 0, which _raise_on_error would read as a
+    # successful tag. Raising here is the only thing standing between the caller
+    # and a silent no-op tag reported as success.
+    if xid is not None and xrefs is None:
+        raise NaviError(
+            "xid requires xrefs (navi's --xid only refines --xrefs). navi would "
+            "warn and then create an EMPTY tag with exit code 0, so this call is "
+            "rejected instead."
+        )
+
+    # -regexp is a global LIKE->REGEXP switch in navi, honoured only by the text
+    # selectors below. Anywhere else navi accepts the flag and ignores it, which
+    # would hand back a literal-match tag masquerading as a pattern match.
+    regexp_capable = [
+        n for n, v in (
+            ("plugin_output", plugin_output), ("plugin_regexp", plugin_regexp),
+            ("plugin_name", plugin_name), ("cpe", cpe), ("xrefs", xrefs),
+            ("by_val", by_val), ("by_cat", by_cat),
+        ) if v is not None
+    ]
+    if regexp and not regexp_capable:
+        raise NaviError(
+            "regexp=True needs a regexp-capable selector: plugin_output (with "
+            "plugin), plugin_name, cpe, xrefs, by_val, or by_cat. navi ignores "
+            "-regexp for every other selector."
+        )
+
     combine_warning = None
     if remove:
         modifiers = [
@@ -887,8 +1377,6 @@ async def navi_enrich_tag(
             raise NaviError(f"Pass exactly one primary selector. Got {len(provided)}: {provided}")
         if (plugin_output or plugin_regexp) and plugin is None:
             raise NaviError("plugin_output and plugin_regexp are modifiers — they require `plugin`.")
-        if xid is not None and xrefs is None:
-            raise NaviError("xid requires xrefs.")
         if histid is not None and scanid is None:
             raise NaviError("histid requires scanid.")
         if require_both and not (parent_category and parent_value):
@@ -901,11 +1389,9 @@ async def navi_enrich_tag(
         args.extend(["--plugin", str(plugin)])
     if plugin_output is not None:
         args.extend(["--output", plugin_output])
-    if plugin_regexp is not None:
-        args.append("-regexp")
-        # -regexp modifies a text option; pass the pattern via --output if not already.
-        if plugin_output is None:
-            args.extend(["--output", plugin_regexp])
+    elif plugin_regexp is not None:
+        # Deprecated path: plugin_regexp was only ever a pattern for plugin output.
+        args.extend(["--output", plugin_regexp])
     if plugin_name is not None:
         args.extend(["--name", plugin_name])
     if cve is not None:
@@ -948,6 +1434,8 @@ async def navi_enrich_tag(
         args.extend(["--cc", parent_category])
     if parent_value is not None:
         args.extend(["--cv", parent_value])
+    if regexp or plugin_regexp is not None:
+        args.append("-regexp")
     if require_both:
         args.append("-all")
     if tone:
@@ -959,8 +1447,25 @@ async def navi_enrich_tag(
         await run_navi(args, cli_hint='navi enrich tag (rerun at CLI; see --help)'),
         "navi enrich tag",
     )
+    extra_warnings: list[str] = []
+    if plugin_regexp is not None:
+        extra_warnings.append(
+            "`plugin_regexp` is deprecated — it only ever applied navi's global "
+            "-regexp flag to plugin output. Use plugin_output=<pattern> with "
+            "regexp=True instead."
+        )
+    if regexp and xrefs is not None and xid is not None:
+        extra_warnings.append(
+            "regexp=True was passed with both xrefs and xid. navi's xid branch "
+            "matches BOTH terms with a literal LIKE and never reaches the REGEXP "
+            "branch, so your pattern was treated as literal text."
+        )
+
     if combine_warning is not None:
-        result["_warning"] = combine_warning
+        extra_warnings.insert(0, combine_warning)
+    if extra_warnings:
+        result["_warning"] = " ".join(extra_warnings)
+    if combine_warning is not None:
         result["_notice"] = (
             "Tag add + remove ran together (see _warning). Allow up to 30 minutes "
             "for results in the Tenable UI before verifying."

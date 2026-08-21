@@ -1,17 +1,20 @@
 ---
 name: navi-core
 description: >
-  Core reference for Tenable navi CLI: installation (Python 3.12+, Docker build),
-  API key setup, database sync commands, version detection, all navi.db table schemas,
-  tagging timing, and the 50K asset scale fork. Use for navi setup and core mechanics:
-  "how do I install navi?", "set up navi", "update my database", "what tables does
-  navi have?", "what version am I running?". Also covers navi config commands, FedRAMP
-  URL config, SLA setup, Docker setup, thread count, SQL indexes, multi-workload pattern,
-  API key permissions, and prerequisite steps before other navi commands. Also flags
-  when long-running syncs must run on the CLI to avoid the MCP tool-call timeout.
-  For fix-it workflows ("why isn't navi working", "zero chunks", "db locked", "empty
-  results", "missing assets", "after upgrade", "tool call timed out") use
-  navi-troubleshooting instead. See the navi router skill for the full skill index.
+  Core reference for Tenable navi CLI: installation, API keys, database sync,
+  version detection, navi.db schemas, tagging timing, and the 50K asset scale
+  fork. Use for setup and core mechanics: "how do I install navi?", "set up
+  navi", "update my database", "what tables does navi have?". Covers the full
+  `config update` option set and how to bound a sync - `days` vs. the `since`
+  (vulns) and `updated_at` (assets) watermark filters; the list-valued
+  `state`, `severity` and `plugin_id`, where `state`/`severity` REPLACE navi's
+  default rather than narrowing it; and `navi_config_rebuild`, the destructive
+  tool that drops and re-creates a table. Trigger on "sync only what changed",
+  "incremental update", "nightly sync", "start over", "rebuild my vulns
+  table", "sync only criticals", "my sync takes too long". Also covers FedRAMP
+  URL config, SLA setup, Docker, threads, SQL indexes, the multi-workload
+  pattern, and the 30d/90d `update full` defaults. For fix-it workflows use
+  navi-troubleshooting.
 ---
 
 # Navi Core — Setup, Config & Schema
@@ -61,6 +64,11 @@ navi-mcp for the full stance.
 
 This is the foundational data sync that populates navi.db from the Tenable
 platform. **Without it, navi.db is empty and every query returns nothing.**
+
+**Default windows: 30 days of vulns, 90 days of assets.** `update full` is
+not "all of history" unless you widen it — `--days N` moves both windows,
+and `--since` / `--updated_at` override them per export. See "Choosing a
+sync window" below.
 
 `navi config update full` is NOT exposed as an MCP tool — first-run syncs
 can pull hundreds of GB and run for hours, which is not well-handled by a
@@ -178,9 +186,9 @@ Each finishes in minutes rather than hours and is safe to call as a tool.
 >
 > **Rule of thumb:**
 > - **Through MCP** — incremental refreshes you're confident will finish
->   in a few minutes (small/scoped tenants, short `days=N` lookback
->   windows). `navi_config_update(kind="vulns", days=7)` for a weekly
->   catch-up is the canonical example.
+>   in a few minutes (small/scoped tenants, a watermark, or a short
+>   `days=N` window). `navi_config_update(kind="vulns", since=<last sync>)`
+>   for a nightly catch-up is the canonical example.
 > - **On the CLI** — any first-time pull, full-size refresh, or anything
 >   on a large tenant. Run it at a terminal where it can take as long as
 >   it needs, throttling threads if the disk is slow:
@@ -190,8 +198,17 @@ Each finishes in minutes rather than hours and is safe to call as a tool.
 >     navi config update assets
 >     ```
 >
-> Narrowing the window with `days=N` is the one practical lever that
-> keeps a vulns refresh inside the MCP timeout. A full-history pull
+> **Narrowing the window is the practical lever that keeps a vulns refresh
+> inside the MCP call budget, and `since` narrows harder than `days`.** A
+> watermark asks only for what changed since the last sync; `days=7` asks
+> for the last week every time, re-downloading the overlap. If a
+> `days=N` call is timing out, try `since=<timestamp of the last successful
+> sync>` before dropping to the CLI. On vulns you can narrow further still
+> without leaving MCP — `severity=["critical","high","medium","low"]` (drops
+> `info`, usually most of the rows), `plugin_id=[...]`, `state=`,
+> `category=`+`value=` are all tool parameters, and the scope is applied by
+> the Tenable export rather than after download. See the option reference
+> below. A full-history pull
 > should always be CLI. For recovery steps when a sync does time out
 > (including what to do about the stuck subprocess and the DB lock that
 > often follows), see navi-troubleshooting's "Long-running operations
@@ -214,15 +231,69 @@ per vuln)
 **`size` (1000–10000) is REQUIRED for `kind="plugins"`** (it's the API page
 size). Can be large/slow on the first run — mind the call budget.
 
+### Scoping parameters — the per-kind allow-list
+
+`navi_config_update` exposes navi's full export-scoping surface, not just the
+window. Each parameter is accepted only by the kinds that support it:
+
+| Kind | Accepts |
+|---|---|
+| `assets` | `days`, `exid`, `threads`, `category` + `value`, `updated_at` |
+| `vulns` | `days`, `exid`, `threads`, `category` + `value`, `state`, `severity`, `vpr_score` + `operator`, `plugin_id`, `since` |
+| *(same set applies to `navi_config_rebuild`)* | `kind` is `assets` or `vulns` only |
+| `fixed` | `days` |
+| `plugins` | `size` (required) |
+| `agents`, `compliance`, `route`, `paths`, `was` | no scoping parameters |
+
+**Passing a parameter to a kind that doesn't accept it raises**, naming what
+was rejected and what that kind does accept. This is deliberate: a filter can
+never silently evaporate into a full-scope sync. `kind="assets", since=...`
+is an error, not an unfiltered asset pull.
+
+Scope is enforced by the **Tenable export itself**, not filtered after
+download — so a narrow parameter genuinely shrinks the transfer, which is
+what makes these the right lever against the call budget.
+
+**Argument rules the server enforces:**
+
+- `category` and `value` are navi's `--c`/`--v` pair — supply **both or
+  neither**; one alone raises.
+- `operator` only has meaning with `vpr_score`; alone it raises.
+- `threads` must be 1–20.
+- `plugin_id`, `state` and `severity` are **lists** (`plugin_id=[19506,
+  51192]`, `state=["open", "reopened"]`), not repeated arguments. A bare
+  string is accepted for `state`/`severity` and treated as a one-element
+  list. An empty list raises — omit it instead. Duplicates collapse; order
+  is preserved.
+- `state` and `severity` **replace navi's default rather than narrowing it** —
+  see "`state` and `severity` replace, they don't narrow" below before using
+  either.
+
+**Warnings come back in the result.** Combinations navi accepts but silently
+resolves one way are surfaced as a `_warning` field rather than an error:
+
+- `days` + `since` → "`since` overrides `days` for the vuln export"
+- `days` + `updated_at` → "`updated_at` overrides `days` for the asset export"
+- `exid` + any other filter → the export already exists, so the filters don't
+  re-scope it; chunks come back exactly as that export was built
+
+Read `_warning` when it's present and tell the user what actually ran — it is
+the safety net for the override traps described below.
+
+**On timeout, the error carries the equivalent CLI command**, shell-quoted
+with the same scoping you asked for and `--threads 1` appended. Hand that to
+the user verbatim rather than composing a fresh full sync.
+
+`since` and `updated_at` are not interchangeable, and neither is just a
+fancier `days` — **read "Choosing a sync window" below before setting up any
+recurring sync.** It covers what each one actually filters on and the one
+behavior that surprises people (`since` returns state *changes*, not
+last-seen).
+
 > **Certificates are NOT a `config update` kind.** The SSL/TLS cert table is
 > populated by **`navi_config(kind="certificates")`** (CLI: `navi config
 > certificates`), which parses plugin 10863 into the `certs` table. There is no
 > `navi config update certificates`. See "Other configuration" below.
-
-**Lookback window:** `navi_config_update(kind=..., days=N)` accepts a `days`
-parameter to change the lookback window. **`days` is ONLY valid for
-`kind="assets"`, `kind="vulns"`, or `kind="fixed"`** — passing it with any
-other kind raises an error.
 
 **Standalone CLI equivalents:**
 
@@ -242,6 +313,296 @@ navi config certificates          # cert table — NOT `config update certificat
 **Agents note:** `navi_config_update(kind="agents")` is NOT included in the
 foundational `navi config update full` CLI command — it must be run
 explicitly whenever agent data is needed.
+
+---
+
+## Choosing a sync window — `days` vs. `since` / `updated_at`
+
+There are two ways to bound an asset or vuln sync, and they behave
+differently. Picking the right one is the single biggest lever on how long
+a refresh takes and how much you re-download.
+
+| Lever | Applies to | Meaning | Shape |
+|---|---|---|---|
+| `days=N` | assets, vulns, fixed | Look back N days **from now** | Relative, recomputed every run |
+| `since=<unix>` | vulns | Findings whose **state changed** after this timestamp | Absolute watermark |
+| `updated_at=<unix>` | assets | Assets **updated** after this timestamp | Absolute watermark |
+
+**`since` and `updated_at` override `days`.** Passing both is not an error —
+the timestamp wins and `days` is ignored. Don't pass both; it only makes the
+call ambiguous to whoever reads it later.
+
+`days` and the timestamp filters answer different questions. `days` is a
+rolling window: "give me everything from the last week," which on every run
+re-downloads the overlap with the previous run. The timestamp filters are a
+watermark: "give me everything I haven't seen yet." On a large tenant the
+difference between a nightly `days=7` and a nightly watermark sync is
+usually an order of magnitude in transferred rows.
+
+### The watermark pattern
+
+The reason these filters exist. Record the moment a sync *starts*, sync,
+then use that recorded moment as the next run's floor:
+
+```
+t0 = <unix timestamp taken BEFORE the sync starts>
+navi_config_update(kind="vulns",  since=t0)
+navi_config_update(kind="assets", updated_at=t0)
+# persist t0_next = <timestamp taken before THIS run> for the next cycle
+```
+
+CLI form:
+
+```bash
+# capture the watermark first, then sync
+WATERMARK=$(date +%s)
+navi config update vulns  --since $(cat ~/.navi/last_vuln_sync 2>/dev/null || echo 0)
+navi config update assets --updated_at $(cat ~/.navi/last_asset_sync 2>/dev/null || echo 0)
+echo "$WATERMARK" | tee ~/.navi/last_vuln_sync > ~/.navi/last_asset_sync
+```
+
+Take the timestamp **before** the sync, not after. A sync that runs for
+twenty minutes will miss anything that changed during those twenty minutes
+if you stamp the finish time. Overlapping slightly is free — the update is
+idempotent; a gap is not.
+
+Both filters take a **Unix epoch integer in seconds**, not a date string
+and not milliseconds. Get one with `date +%s` on macOS/Linux,
+`[int][double]::Parse((Get-Date -UFormat %s))` in PowerShell, or
+`int(time.time())` in Python.
+
+### `since` on vulns is a STATE-CHANGE filter, not a last-seen filter
+
+This is the sharp edge. `--since` returns findings whose **state**
+transitioned (open → fixed, new open, reopened) after the timestamp. A
+finding that has been sitting open and unchanged since last quarter will
+**not** come back in a `since` sync, even though it was re-observed by
+every scan in between.
+
+That is exactly what you want for "what changed since I last looked," and
+exactly wrong for "rebuild my current picture." Practical consequences:
+
+- **Don't seed a fresh navi.db with `since`.** It will look sparse and the
+  gaps won't be obvious. Seed with `update full` or a wide `days`, then
+  switch to watermarks.
+- **Reconcile periodically.** Run a wider `days` sweep (weekly or monthly,
+  e.g. `days=30`) alongside the nightly watermark syncs to catch drift and
+  anything the state-change stream missed.
+- **`last_found` will look stale** for unchanged findings between
+  reconciliation sweeps. That's the filter working as designed — not the
+  "stale data" symptom in navi-troubleshooting. Check when you last ran a
+  `days` sweep before chasing it.
+
+`updated_at` on assets is less treacherous — Tenable bumps an asset's
+`updated_at` on essentially any change to the asset record — but the same
+seed-then-watermark advice applies.
+
+### When to reach for which
+
+| Situation | Use |
+|---|---|
+| First sync / empty navi.db | `navi config update full` (CLI) |
+| Nightly or hourly incremental on a large tenant | `since` / `updated_at` watermark |
+| "Catch me up, I've been away a week" | `days=7` |
+| A vulns sync that keeps blowing the MCP call budget | `since` watermark — usually the smallest possible job |
+| Periodic reconciliation against drift | `days=30` sweep |
+| Backfilling after "zero chunks" | `days=365` (see navi-troubleshooting) |
+
+---
+
+## Full option reference — `navi config update`
+
+`navi_config_update` mirrors nearly all of these — only `-rebuild` and the
+`full` subcommand stay CLI-only. Parameter names mostly match the flags, with
+two exceptions worth memorising: `--c`/`--v` become `category`/`value`, and
+`--plugin_id` becomes a list.
+
+### `update assets`
+
+| Option | MCP param | Notes |
+|---|---|---|
+| `--days N` | `days=N` | Relative lookback window |
+| `--updated_at <unix>` | `updated_at=<unix>` | Assets updated after this epoch; **overrides `--days`** |
+| `--exid <id>` | `exid="<uuid>"` | Download an export that already exists instead of requesting a new one — the recovery path when the export succeeded on Tenable's side but the local ingest died. Other filters do **not** re-scope it; the server returns a `_warning` if you pass any |
+| `--threads N` | `threads=N` | 1–20, enforced. Lower on slow disks / low RAM (see navi-troubleshooting's DB-lock section) |
+| `--c <category>` / `--v <value>` | `category=` + `value=` | Restrict the sync to one tag — the basis of the multi-workload pattern below. **Both or neither** |
+| `-rebuild` | **separate tool:** `navi_config_rebuild(kind="assets")` | **DESTRUCTIVE.** Drops and re-creates the `assets` table, then syncs into it fresh. Single hyphen on the CLI. See "`navi_config_rebuild`" below |
+
+### `update vulns`
+
+| Option | MCP param | Notes |
+|---|---|---|
+| `--days N` | `days=N` | Relative lookback window |
+| `--since <unix>` | `since=<unix>` | Findings with **state changes** after this epoch; **overrides `--days`** |
+| `--exid <id>` | `exid="<uuid>"` | Download an existing export by UUID; other filters don't re-scope it |
+| `--threads N` | `threads=N` | 1–20, enforced |
+| `--c` / `--v` | `category=` + `value=` | Restrict to one tag. **Both or neither** |
+| `--state [open\|reopened\|fixed]` (repeatable) | `state=["open", "reopened"]` | A **list**. **REPLACES** navi's default of open+reopened — see "`state` and `severity` replace, they don't narrow" below |
+| `--severity [critical\|high\|medium\|low\|info]` (repeatable) | `severity=["critical", "high"]` | A **list**. **REPLACES** navi's default of all five. `info` is usually the bulk of a tenant's rows, so naming the other four is the cheapest way to shrink a vulns sync — and it's now one call, not four |
+| `--vpr_score N` + `--operator [gte\|gt\|lt\|lte]` | `vpr_score=7.0` + `operator="gte"` | VPR threshold. `operator` without `vpr_score` raises |
+| `--plugin_id N` (repeatable) | `plugin_id=[19506, 51192]` | A **list** through MCP, a repeated flag on the CLI. Empty list raises. The purpose-built-workload lever (see below) |
+| `-rebuild` | **separate tool:** `navi_config_rebuild(kind="vulns")` | **DESTRUCTIVE.** Drops and re-creates the `vulns` table, then syncs into it fresh. Single hyphen on the CLI. See "`navi_config_rebuild`" below |
+
+### `update full`
+
+Defaults to **30 days of vulns / 90 days of assets**.
+
+| Option | Notes |
+|---|---|
+| `--days N` | Moves both windows |
+| `--since <unix>` | Overrides `--days` **for the vuln export only** |
+| `--updated_at <unix>` | Overrides `--days` **for the asset export only** |
+| `--threads N` | 1–20 |
+| `--c` / `--v` | Scope the whole sync to one tag |
+| `--state` / `--severity` | Applied to the vuln export; both repeatable, and both REPLACE their default |
+| `-rebuild` | **DESTRUCTIVE.** Drops and re-creates **both** tables. CLI-only — from MCP it's two `navi_config_rebuild` calls. See below |
+
+Because `--since` and `--updated_at` are per-export overrides here, one
+`update full` can carry a wide asset history and a narrow vuln window (or
+the reverse) in a single command:
+
+```bash
+# assets back to a fixed watermark, vulns only what changed since Monday
+navi config update full --updated_at 1750000000 --since 1755000000
+```
+
+**Composition:** the filters are AND-ed. `--severity critical --plugin_id
+19506 --since <unix>` gives critical findings for plugin 19506 whose state
+changed after the watermark. A narrow combination is what makes the
+purpose-built workload pattern below cheap to maintain.
+
+### `state` and `severity` replace, they don't narrow
+
+Both are repeatable (`multiple=True` in navi), so through MCP both take a
+**list** — `state=["open", "reopened"]`, `severity=["critical", "high"]`. A
+bare string still works and is treated as a one-element list; an empty list
+raises; duplicates collapse and order is preserved.
+
+> **The trap: supplying either flag REPLACES navi's default rather than
+> narrowing it.**
+>
+> - `--state` defaults to **open + reopened** — *not* fixed.
+> - `--severity` defaults to **all five**.
+>
+> So `state=["fixed"]` gives you fixed findings **only** — it does not add
+> fixed to what you already pull. Getting everything including fixed means
+> naming all three: `state=["open", "reopened", "fixed"]`.
+
+The practical win is on the severity side. `info` is usually the bulk of a
+tenant's rows, and dropping it is now a single call rather than four:
+
+```
+navi_config_update(kind="vulns", severity=["critical", "high", "medium", "low"])
+```
+
+### `navi_config_rebuild` — start the table over
+
+**DESTRUCTIVE, and its own tool.** `-rebuild` is not a parameter on
+`navi_config_update`; it is a separate MCP tool, `navi_config_rebuild`. That
+split is deliberate — MCP's `destructiveHint` is per-tool, so a boolean on
+`navi_config_update` would have to mark every ordinary refresh destructive or
+misreport the rebuild. Keeping them apart lets `navi_config_update` stay
+honestly non-destructive.
+
+```
+navi_config_rebuild(kind="vulns", days=365, confirm=True)
+```
+
+```bash
+navi config update vulns -rebuild --days 365      # note the SINGLE hyphen
+```
+
+**Gates:** `NAVI_MCP_ALLOW_WRITES=1` **and** per-call `confirm=True`.
+
+**`kind` is `assets` or `vulns` — there is no `full`.** Rebuilding both in one
+shot is `navi config update full -rebuild` at the terminal; from MCP it is two
+calls.
+
+Every ordinary `config update` is additive — it merges into the existing table.
+Rebuild drops the table, re-creates it empty, and downloads into it fresh.
+
+### Why `confirm=True` is structural here, not ceremony
+
+navi calls `click.confirm()` before dropping the table. Under MCP, stdin is
+closed, so that prompt would hit EOF and abort the command — which is why
+`-rebuild` did not work through MCP at all until this tool existed. The tool
+answers navi's prompt on your behalf, and **your `confirm=True` IS that
+answer.** It is not a second, decorative confirmation layered on top of
+navi's; it is the same one, forwarded. Narrate the drop and get the user's
+agreement before you pass it.
+
+### What is and isn't destroyed
+
+**The local navi.db table only. Nothing in Tenable VM changes.** What you lose
+is the cached copy and the download time it cost — on a large tenant, hours.
+navi.db itself survives, along with everything in it that isn't the dropped
+table: API keys, `tags`, `fixed`, `agents`, `epss`, `zipper`, and the WAS
+`apps` / `findings` tables.
+
+**Derived tables go stale, not empty.** `certs`, `software`, `vuln_route` and
+`vuln_paths` are all computed from asset/vuln data, so after a rebuild they
+describe records that no longer exist. The tool's `_notice` says so on every
+call — pass it along and refresh them:
+
+```
+navi_config(kind="certificates")
+navi_config(kind="software")
+navi_config_update(kind="route")
+navi_config_update(kind="paths")
+```
+
+**Expect the indexes to go too.** navi-mcp doesn't say so, but dropping a
+table drops its indexes with it in SQLite — so a rebuilt `vulns` should come
+back unindexed, and tagging would slow to its pre-optimize speed. Re-running
+`navi config optimize` at the CLI costs seconds against a populated table, so
+it's worth doing rather than checking.
+
+### When this is the right tool
+
+- A schema mismatch after a navi upgrade.
+- A partially-downloaded table from an interrupted sync.
+- Duplicate or stale rows an ordinary update won't clear — because an update
+  *merges* rather than replaces.
+
+**If the user just wants fresher data, this is the wrong tool.**
+`navi_config_update` does that without discarding anything, and is almost
+always what was actually meant.
+
+> **⚠️ The dangerous combination is rebuild plus a filter.** The drop is
+> unconditional, but the download that follows obeys every scoping parameter —
+> so whatever the filter excludes is simply gone, and nothing downstream
+> announces it. `navi_config_rebuild(kind="vulns", severity=["critical"],
+> confirm=True)` leaves a `vulns` table containing **only** criticals: a much
+> smaller database than you started with, not a fresher one. From then on
+> every query, tag, export, and dashboard silently reports against that subset.
+>
+> `state` bites hardest here, because it replaces rather than narrows:
+> `state=["open"]` discards your reopened findings too, and the old table is
+> already gone by the time the narrowed download runs.
+>
+> If a deliberately scoped table is the goal, this is the right tool — see the
+> multi-workload pattern below. If the goal was "clean up my data," drop the
+> filters.
+
+**Never pair a rebuild with `since` / `updated_at`.** It is the worst
+combination available: you empty the table, then re-fill it from a watermark
+that returns only what changed after that timestamp — and on vulns, only state
+*changes*. You end up with a thin slice of recent churn and no baseline
+underneath it. Rebuild against a wide `days` (or the defaults), then switch to
+watermarks for the refreshes that follow.
+
+**Full sequence after a vulns rebuild:**
+
+```
+navi_config_rebuild(kind="vulns", days=365, confirm=True)
+navi_config(kind="certificates")
+navi_config(kind="software")
+navi_config_update(kind="route")
+navi_config_update(kind="paths")
+```
+```bash
+navi config optimize      # CLI — the drop very likely took the indexes too
+```
 
 ---
 
@@ -355,9 +716,18 @@ navi config update full          # everything — large, comprehensive
 # Purpose-built workload: only assets with a specific plugin
 mkdir ~/navi-jenkins && cd ~/navi-jenkins
 navi config keys --a <KEY> --s <KEY>
-navi config update vulns         # then filter to only pull plugin 12345
+navi config update vulns --plugin_id 12345 --days 365
 # Results: smaller DB, faster tagging, faster queries
+
+# Keep it current cheaply — only what changed since the last run
+navi config update vulns --plugin_id 12345 --since 1755000000
 ```
+
+`--plugin_id` is repeatable, so a workload can cover a set of related
+plugins: `--plugin_id 22869 --plugin_id 20811 --plugin_id 83991` builds a
+software-inventory-only database. Pair the initial wide pull with a
+`--since` watermark for refreshes and the workload stays small
+indefinitely.
 
 **The Exposure Management Environment pattern**: treat each navi directory
 as a scoped workload environment — a compliance audit, a specific
@@ -449,9 +819,14 @@ reduction**. Always use DISTINCT when communicating workload to remediators.
 | Need | MCP tool call / CLI |
 |------|---------|
 | Set API keys | CLI only, out-of-band: `navi config keys --a ... --s ...` |
-| Full foundational sync | CLI only: `navi config update full` |
+| Full foundational sync | CLI only: `navi config update full` (30d vulns / 90d assets by default) |
 | Sync assets | `navi_config_update(kind="assets")` |
 | Sync vulns | `navi_config_update(kind="vulns")` |
+| Sync only what changed since last time (vulns) | `navi_config_update(kind="vulns", since=<unix>)` |
+| Sync only what changed since last time (assets) | `navi_config_update(kind="assets", updated_at=<unix>)` |
+| Sync one plugin / severity / state only | `navi_config_update(kind="vulns", plugin_id=[N])` / `severity=` / `state=` |
+| Re-download a failed export by ID | `navi_config_update(kind="vulns", exid="<uuid>")` |
+| Drop and re-create a table, then sync fresh | `navi_config_rebuild(kind="vulns", confirm=True)` — destructive, write-gated |
 | Sync agents | `navi_config_update(kind="agents")` |
 | Build routing + paths tables | `navi_config_update(kind="route")` then `navi_config_update(kind="paths")` |
 | Build cert table | `navi_config(kind="certificates")` (CLI: `navi config certificates`) |
@@ -484,7 +859,9 @@ The most frequent issues and their fixes:
 | DB errors after upgrade | Schema mismatch | `rm navi.db` + re-keys + `update full` |
 | Missing assets | Key scoped to subset | Check key permissions in Tenable One |
 | Agent tags return zero | Stale agents table | `navi_config_update(kind="agents")` |
-| `navi_config_update` times out after ~4 min | Sync longer than MCP client timeout (big tenant, usually vulns) | Run on CLI: `navi config update vulns --threads 1`; or shrink with `days=N` |
+| `navi_config_update` times out after ~4 min | Sync longer than MCP client timeout (big tenant, usually vulns) | Shrink with `since=<last sync>` first, then `days=N`; else CLI: `navi config update vulns --threads 1` |
+| Vulns look stale but syncs report success | Running `since` watermarks only — unchanged findings never re-appear | Run a periodic `days=30` reconciliation sweep. See "Choosing a sync window" |
+| A table lost most of its rows | `-rebuild` run with a filter — the drop is unconditional, the re-fill is filtered | Re-run `-rebuild` with a wide `--days` and no filters. See "`-rebuild`" |
 
 For full context on each symptom — root cause, resolution steps, MCP vs.
 standalone variants — see **navi-troubleshooting**.

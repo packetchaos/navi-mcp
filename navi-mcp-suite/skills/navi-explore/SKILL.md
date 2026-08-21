@@ -1,17 +1,20 @@
 ---
 name: navi-explore
 description: >
-  Data exploration skill for Tenable navi CLI. Use for ANY request to query, search,
-  or display navi data. Covers all navi explore data subcommands: cve, exploit, name,
-  output, xrefs, docker, webapp, creds, scantime, software, audits, plugin, port,
-  route, paths, asset, db_info. Also covers all 26 navi explore info subcommands:
-  users, scanners, scans, running, policies, credentials, agents, agent_groups,
-  networks, tags, categories, assets, licensed, status, sla, logs, permissions, auth,
-  exclusions, target_groups, templates, exports, tone, attributes, user_groups,
-  version. Also covers raw SQL access via navi_explore_query. Trigger on: "show me",
-  "find assets", "query navi", "which assets have", "list scanners/users/scans/policies",
-  "show me what's running", "CVE lookup", "exploitable assets", "what's in my
-  environment".
+  Data exploration skill for Tenable navi CLI. Use for ANY request to query,
+  search, or display navi data. Covers all navi explore data subcommands: cve,
+  exploit, name, output, xrefs, docker, webapp, creds, scantime, software,
+  audits, plugin, port, route, paths, asset, db_info — including the `output`
+  text filter on `plugin` and `regexp=True`, which navi honours on only four
+  subcommands (name, output, xrefs, plugin) and which raises on the rest
+  instead of silently matching literally. Also covers all 26 navi explore info
+  subcommands: users, scanners, scans, running, policies, credentials, agents,
+  agent_groups, networks, tags, categories, assets, licensed, status, sla,
+  logs, permissions, auth, exclusions, target_groups, templates, exports,
+  tone, attributes, user_groups, version. Also covers raw SQL via
+  navi_explore_query. Trigger on: "show me", "find assets", "query navi",
+  "which assets have", "search by pattern", "regex search", "CVE lookup",
+  "what's in my environment".
 ---
 
 # Navi Explore — Data Exploration Reference
@@ -79,6 +82,20 @@ All output for one plugin across all assets.
 ```bash
 navi explore data plugin <PLUGIN_ID>
 ```
+
+Narrow to assets whose output **for that plugin** contains text, with the
+`output` parameter:
+
+`navi_explore_data(subcommand="plugin", plugin_id=10863, output="Not After")`
+
+```bash
+navi explore data plugin 10863 --out "Not After"
+```
+
+> **Naming trap.** navi spells this `--out` on `explore data plugin`, but
+> `--output` on `enrich tag`. The MCP parameter is `output` on both, which is
+> the one mercy here — but if you drop to the CLI, the flag changes name
+> depending on the command.
 
 Inspect a table's schema. Prefer the `navi://schema/{table}` resource when
 running under navi-mcp — it's cheaper and always available. The db_info
@@ -159,6 +176,57 @@ Find by cross-reference type — CISA KEV, IAVA, Bugtraq, OSVDB, MSFT, MSKB, CVE
 navi explore data xrefs CISA
 navi explore data xrefs iava --xid "2024-0001"
 ```
+
+---
+
+## `regexp=True` — four subcommands, not seventeen
+
+`regexp=True` maps to navi's `-regexp`, switching the search from `LIKE` to
+`REGEXP`. navi honours it on exactly four `explore data` subcommands:
+
+| Subcommand | Pattern applies to |
+|---|---|
+| `name` | the plugin name |
+| `output` | the plugin output |
+| `xrefs` | the cross-reference type |
+| `plugin` | the `output` text **only** — never the plugin ID |
+
+`regexp=True` on any of the other thirteen **raises**, naming the four that
+work. navi would otherwise accept the flag and quietly ignore it, returning a
+literal match that reads as a pattern match — the same failure mode as on the
+tagging side.
+
+```
+navi_explore_data(subcommand="name",   name="Apache (2\\.4|2\\.2)", regexp=True)
+navi_explore_data(subcommand="output", output="Log4j 2\\.(1[0-6]|[0-9])\\b", regexp=True)
+navi_explore_data(subcommand="xrefs",  xref_type="CISA|IAVA", regexp=True)
+```
+
+```bash
+navi explore data name "Apache (2\.4|2\.2)" -regexp
+navi explore data output "Log4j 2\.(1[0-6]|[0-9])\b" -regexp
+navi explore data xrefs "CISA|IAVA" -regexp
+```
+
+**Two extra rules on the edge cases:**
+
+- **`plugin` + `regexp=True` requires `output`.** On that subcommand `-regexp`
+  only switches the `--out` text search, so without `output` it is a no-op —
+  the tool raises rather than pretending it did something.
+
+  ```
+  navi_explore_data(subcommand="plugin", plugin_id=10863,
+                    output="Not After.*2026", regexp=True)
+  ```
+
+- **`xrefs` + `xref_id` + `regexp=True` ignores the pattern.** Supplying
+  `xref_id` puts navi on a two-term `LIKE` branch that never reaches the
+  `REGEXP` branch. The call succeeds and returns a `_warning` saying the
+  pattern was treated literally — surface that to the user rather than
+  reporting a clean result. Drop `xref_id` if you need the pattern.
+
+`-regexp` is a bare boolean flag on the CLI: the pattern belongs to the
+subcommand's own argument, never after `-regexp` itself.
 
 Find assets with a vulnerability on a specific port.
 
@@ -263,6 +331,8 @@ navi explore data paths
 | "show vuln paths" | `navi_explore_data(subcommand="paths")` |
 | "show everything about asset X" | `navi_explore_data(subcommand="asset", asset=<ip_or_uuid>)` |
 | "show me plugin 12345 across the fleet" | `navi_explore_data(subcommand="plugin", plugin_id=12345)` |
+| "show plugin 12345 only where output mentions X" | `navi_explore_data(subcommand="plugin", plugin_id=12345, output="X")` |
+| "search by pattern / regex / wildcard" | add `regexp=True` — only on `name`, `output`, `xrefs`, `plugin` |
 
 ---
 
