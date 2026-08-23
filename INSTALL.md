@@ -42,6 +42,9 @@ Install the package. pip resolves and pins the MCP SDK for you — this is the
 step that prevents the failure described at the top of this page.
 
 ```bash
+# from PyPI
+python3 -m pip install navi-mcp
+
 # from a checkout
 python3 -m pip install .
 
@@ -53,7 +56,7 @@ To get the `navi` CLI into the *same* environment, so `NAVI_BIN` resolves
 without an absolute path:
 
 ```bash
-python3 -m pip install ".[navi]"
+python3 -m pip install "navi-mcp[navi]"     # or ".[navi]" from a checkout
 ```
 
 This installs a `navi-mcp` console script. Verify before touching any config:
@@ -64,8 +67,8 @@ which navi-mcp           # the absolute path for your config's "command"
 ```
 
 For a self-contained install that cannot be disturbed by other packages in the
-interpreter, use a dedicated environment — `pipx install .`, or a venv you point
-the config at.
+interpreter, use a dedicated environment — `pipx install "navi-mcp[navi]"`, or a
+venv you point the config at.
 
 ### Then configure Claude Desktop
 

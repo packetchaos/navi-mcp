@@ -1,23 +1,48 @@
 [build-system]
-requires = ["hatchling>=1.21"]
+# hatchling >= 1.27 is required for PEP 639 (`license` as an SPDX expression
+# plus `license-files`). Older hatchling silently falls back to the deprecated
+# `license = { file = ... }` form and PyPI rejects the metadata.
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "navi-mcp"
-version = "1.0.0"
+# Single-sourced from navi-mcp-suite/server/__init__.py (__version__) via
+# [tool.hatch.version] below — bump it in ONE place, not two.
+dynamic = ["version"]
 description = "MCP server wrapping the Tenable navi CLI for Vulnerability Management and Exposure Management workflows."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
-keywords = ["mcp", "tenable", "navi", "vulnerability-management", "exposure-management"]
+authors = [{ name = "Casey Reid" }]
+maintainers = [{ name = "Casey Reid" }]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "tenable",
+    "navi",
+    "vulnerability-management",
+    "exposure-management",
+    "tenable-one",
+    "security",
+]
+# NOTE: no "License :: OSI Approved :: ..." classifier. PEP 639 makes the SPDX
+# `license` field above authoritative, and PyPI rejects uploads that set both.
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Console",
     "Intended Audience :: Information Technology",
-    "Topic :: Security",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
 ]
 
 # The whole point of this file: the SDK dependency is declared and enforced at
@@ -56,7 +81,17 @@ navi-mcp = "navi_mcp.server:main"
 
 [project.urls]
 Homepage = "https://github.com/packetchaos/navi-mcp"
+Source = "https://github.com/packetchaos/navi-mcp"
+Documentation = "https://github.com/packetchaos/navi-mcp/blob/main/INSTALL.md"
+Changelog = "https://github.com/packetchaos/navi-mcp/blob/main/CHANGELOG.md"
 Issues = "https://github.com/packetchaos/navi-mcp/issues"
+"navi CLI" = "https://github.com/packetchaos/navi"
+
+# Version is read from the __version__ string in the server package's
+# __init__.py, which is dependency-free by design (see the note in that file),
+# so this import-free regex read is safe at build time.
+[tool.hatch.version]
+path = "navi-mcp-suite/server/__init__.py"
 
 # ---------------------------------------------------------------------------
 # Build mapping
@@ -100,6 +135,7 @@ exclude = [
     "navi-mcp-suite/server/tests",
     "**/__pycache__",
     "**/*.pyc",
+    "**/.DS_Store",
 ]
 
 [tool.hatch.build.targets.wheel.sources]
@@ -111,7 +147,9 @@ include = [
     "navi-mcp-suite/",
     "README.md",
     "INSTALL.md",
+    "PUBLISHING.md",
+    "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",
 ]
-exclude = ["**/__pycache__", "**/*.pyc"]
+exclude = ["**/__pycache__", "**/*.pyc", "**/.DS_Store"]

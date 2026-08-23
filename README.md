@@ -78,8 +78,22 @@ installs 2.x. Installing this project as a package enforces the pin for you.
 ### Install
 
 ```bash
-pip install .                # or: pip install "git+https://github.com/packetchaos/navi-mcp"
-pip install ".[navi]"        # also pulls navi-pro into the same environment
+pip install navi-mcp                 # from PyPI
+pip install "navi-mcp[navi]"         # also pulls navi-pro into the same environment
+```
+
+For a self-contained install that other packages in the interpreter cannot
+disturb — which is what you want behind Claude Desktop — use pipx:
+
+```bash
+pipx install "navi-mcp[navi]"
+```
+
+Or from source:
+
+```bash
+pip install .                # from a checkout
+pip install "git+https://github.com/packetchaos/navi-mcp"
 ```
 
 ### Run

@@ -245,7 +245,44 @@ logging.basicConfig(
 )
 log = logging.getLogger("navi-mcp")
 
+# Our own version, for the `serverInfo` block of the initialize response.
+# Resolution order, most to least authoritative:
+#   1. the installed distribution's metadata  (pip install navi-mcp)
+#   2. navi_mcp.__version__                   (importable but not installed)
+#   3. "0.0.0+unknown"                        (server.py run as a loose script)
+# Never raise from here — a version string is not worth failing startup over.
+def _server_version() -> str:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("navi-mcp")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # pragma: no cover - importlib.metadata always present on 3.10+
+        pass
+    try:
+        from navi_mcp import __version__
+
+        return __version__
+    except Exception:
+        return "0.0.0+unknown"
+
+
+__version__ = _server_version()
+
 mcp = FastMCP("navi-mcp")
+
+# FastMCP 1.x does not expose `version` on its constructor, so the underlying
+# low-level Server reports the *SDK's* version in `serverInfo` unless we set it.
+# That makes every client — Claude Desktop's server list included — show the mcp
+# package's version where this server's belongs. Reach through and correct it,
+# defensively: the private attribute is stable across mcp 1.9–1.29, but a miss
+# should degrade to the old (merely wrong) label, not break startup.
+try:  # pragma: no cover - depends on SDK internals
+    mcp._mcp_server.version = __version__
+except Exception:
+    log.debug("could not set serverInfo.version; client will show the SDK version")
 
 # ---------------------------------------------------------------------------
 # Subprocess helper
