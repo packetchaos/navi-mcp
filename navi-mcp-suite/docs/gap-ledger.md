@@ -202,3 +202,64 @@ validated `navi_*` tool surface / current CLI.
 6. ✅ Final cross-suite residual sweep: 0 real occurrences of any known bug pattern; all 11 SKILL.md < 500 lines.
 
 **PROJECT COMPLETE: 11/11 skills + corrected server, validated against the authoritative `navi --help` tree. Runtime validation against a live tenant still recommended (one read call) per the README.**
+
+---
+
+## ROUND C — 2026-08-21 (source-verified against navi-pro 8.6.4 wheel)
+
+Method change worth noting: earlier rounds validated flags against a captured
+`--help` tree. This round read `navi/plugins/*.py` out of the published
+`navi_pro-8.6.4-py3-none-any.whl`, which surfaces behaviour `--help` cannot —
+notably guards that warn without exiting, and flags whose effect depends on
+which selector they accompany.
+
+| ID | Area | Class | Severity | Finding | Owner | Status |
+|---|---|---|---|---|---|---|
+| **C-navi-1** | navi CLI — `navi/plugins/tag_rules.py` | Accuracy | **Blocker** | **Bug in navi itself, not the MCP.** `run_rules_now()` shells out with `--xref` for every `xref`-type rule (lines 69, 70, 73, 74). The option declared on `enrich.tag` is `--xrefs` (enrich.py:406); `--xref` does not exist and click does **not** do prefix abbreviation, so the subprocess dies with `Error: No such option: --xref (Possible options: --xref-id, --xrefs)`. Because the call goes through `os.system`, the failure is invisible to the rule runner — every stored cross-reference rule silently never re-tags. The other nine rule branches (`plugin_id`, `plugin_name`, `plugin_output`, `cve`, `group`, `scantime`, `scanid`, `ports`, …) use correct flags. Fix: `--xref` → `--xrefs` in all four strings. Note `--xid` in the same strings IS valid (enrich.py:407 declares `--xid`/`--xref-id`). | packetchaos/navi | **Reported — fix prompt written** |
+| **C-mcp-1** | server.py — `navi_enrich_tag` xrefs spelling | Accuracy | — | **Verified correct, no change.** The MCP emits `--xrefs` + `--xid`, matching enrich.py:406–407. Confirms B-enrich-2. `--xref-id` exists only as a click alias of `--xid`; click resolves the parameter name to `xid`, so the MCP's spelling is the canonical one. | navi-mcp | **Verified** |
+| **C-mcp-2** | server.py — `xid` without `xrefs` | Correctness | **Blocker** | navi's own guard (enrich.py:480–481) `click.echo()`s "You must supply a Cross Reference Type using --xrefs option" and **does not `exit()`** — unlike the neighbouring `--output`-without-`--plugin` guard at 476–478, which does. navi therefore proceeds with no selector, creates an EMPTY tag, and returns exit code 0, which `_raise_on_error` reads as success. The MCP guarded this only on the `remove=False` path. Fix applied: the guard now fires on **every** path, remove included, and its message explains why the tool is stricter than the CLI. | navi-mcp | **Applied** |
+| **C-mcp-3** | server.py — `-regexp` scope | Coverage | Blocker | `-regexp` is a **global** LIKE→REGEXP switch in navi, honoured by `by_val` (458), `by_cat` (468), `plugin`+`output` (490), `name` (542), `cpe` (803) and `xrefs` (825). The MCP modelled it as `plugin_regexp`, a string that required `plugin` — so **regexp cross-reference tagging was unreachable through MCP entirely** (`xrefs="CISA\|IAVA"` had no path). Fix applied: added `regexp: bool`; passing it without a regexp-capable selector raises rather than silently degrading to a literal LIKE match. `plugin_regexp` retained as a deprecated alias that emits a `_warning`. | navi-mcp | **Applied** |
+| **C-mcp-4** | server.py — `xrefs` + `xid` + `regexp` | Accuracy | Polish | navi's `xid` branch (enrich.py:822) is a two-term literal `LIKE '%xrefs%' AND LIKE '%xid%'` and never reaches the REGEXP branch below it, so `-regexp` is accepted and ignored. Fix applied: that combination returns a `_warning` saying the pattern was treated as literal text. | navi-mcp | **Applied** |
+| **C-mcp-6** | server.py — `navi_explore_data` `-regexp` | Coverage | Blocker | **Same class of bug as C-mcp-3, swept across the whole CLI.** An AST walk of the 8.6.4 wheel (parsing `@click.option`/`@click.argument` decorators rather than grepping) found exactly **six** commands declaring an xref or regexp option: `enrich tag`, `export vulns`, and four `explore data` subcommands — `plugin` (explore.py: `--out`, `-regexp`), `output`, `name`, and `xrefs` (`--xid`/`--xref-id`, `-regexp`). `navi_explore_data` passed `-regexp` for **none** of them, so every regexp read was silently a literal LIKE. Fix applied: `regexp: bool` honoured for those four subcommands and raising for the other thirteen. On `plugin`, navi's `-regexp` only switches the `--out` text search, so `regexp=True` without `output` raises. | navi-mcp | **Applied** |
+| **C-mcp-7** | server.py — `explore data plugin --out` | Coverage | Blocker | The `--out` option on `explore data plugin` (narrow a plugin lookup to assets whose output for THAT plugin contains text) was dropped entirely — the tool's `output` param only fed `subcommand='output'`. So "which assets did plugin 19506 report `<text>` on" had no path through MCP. Fix applied: `output` now maps to `--out` for `subcommand='plugin'`. Naming trap for future work: navi spells this **`--out`** on `explore data plugin` but **`--output`** on `enrich tag`. | navi-mcp | **Applied** |
+| **C-mcp-5** | server.py — `navi_export` vulns filters | Coverage | — | **Not a gap — by design.** `navi export vulns` accepts `--c`/`--v`/`--severity`/`--plugin`/`--name`/`--output`/`--cve`/`--xrefs`/`-regexp` (export.py:125–137), none of which `navi_export` exposes. The intended navi pattern is **tag then export by tag**: narrow once with `navi_enrich_tag` (full selector surface, xrefs included), then `navi_export(subcommand='bytag')` — which is also the only export carrying ACR + AES, so it yields a strictly richer CSV than a filtered `export vulns`. For a one-off slice not worth a tag, `navi_export(subcommand='query', sql=…)` already expresses any of those filters. Documented in the server docstring; no code change. | navi-mcp | **Closed — no change** |
+
+## ROUND D — 2026-08-21 (`-rebuild`, verified against the dev checkout)
+
+Source of truth this round: `C:\Users\packe\claud_navi\navi`,
+`navi/plugins/config.py` — newer than the 8.6.4 PyPI wheel used in Round C.
+
+| ID | Area | Class | Severity | Finding | Owner | Status |
+|---|---|---|---|---|---|---|
+| **D-mcp-1** | server.py — `navi_config_rebuild` | Coverage | — | New `-rebuild` flag on `config update assets` / `vulns` / `full` drops the named local table(s), re-creates them, then downloads fresh. Exposed as a **separate tool**, not a flag on `navi_config_update`: MCP's `destructiveHint` is per-tool, so a boolean on the existing tool would either mark every ordinary refresh destructive or misreport the rebuild. `navi_config_rebuild` carries `destructiveHint=True`; `navi_config_update` stays honestly non-destructive. Gated `NAVI_MCP_ALLOW_WRITES=1` + `confirm=True`. Tool count 19 → 20. | navi-mcp | **Applied** |
+| **D-mcp-2** | server.py — `run_navi(stdin_text=…)` | Correctness | **Blocker** | `rebuild_tables()` calls `click.confirm()` **before** dropping. `run_navi` passes `stdin=subprocess.DEVNULL`, so click hits EOF, raises `Abort`, and the command exits 1 without touching the table — `-rebuild` was simply **unusable** through MCP (it failed closed, which is the good failure, but it never worked). Added `stdin_text` to `run_navi`, used only by the rebuild path, which answers `"y\n"`. This is why `confirm=True` is mandatory *first*: the caller's confirm IS the answer handed to navi. Verified end-to-end against a real `click.confirm` subprocess — DEVNULL → rc=1, `"y\n"` → rc=0. Default stays DEVNULL everywhere else, so an unforeseen prompt still aborts rather than hangs. | navi-mcp | **Applied** |
+| **D-mcp-3** | server.py — `_build_update_call()` | Consistency | Polish | Validation, argv construction, warnings and `cli_hint` extracted from `navi_config_update` into a shared helper the rebuild tool also calls. The destructive path therefore inherits the identical per-kind allow-list — the two tools cannot drift on which flags a kind accepts. | navi-mcp | **Applied** |
+| **D-mcp-4** | server.py — post-rebuild `_notice` | Coverage | — | navi's `rebuild_reminder()` warns that `certs`, `software`, `vuln_route` and `vuln_paths` are derived from assets/vulns and are stale after a drop. That reminder only reaches stdout; the tool now returns it as a `_notice` naming the MCP calls that refresh each one. | navi-mcp | **Applied** |
+| **D-mcp-5** | server.py — `config update full` docstring | Currency | — | `full`'s help no longer reads "Delete the current Database" — the delete moved behind `-rebuild`, so the stated reason for keeping `full` CLI-only was stale. Corrected: it stays CLI-only purely because a 30d-vuln + 90d-asset pull runs for hours, well past the ~4-min call budget. Rebuilding both tables at once remains `navi config update full -rebuild` at the terminal; from MCP it is two calls. | navi-mcp | **Applied** |
+| **D-mcp-6** | server.py — `--state` / `--severity` arity | Coverage | — | navi declares both as `multiple=True` with defaults `["open","reopened"]` and all five severities. The MCP models each as a single value, so `state="open"` **replaces** the default pair rather than narrowing within it — you cannot ask for open+reopened but not fixed. Not wrong, but less expressive than the CLI. Fixed by mirroring `plugin_id`: both accept a list and repeat the flag, on the update and rebuild paths alike (shared through `_build_update_call`). `_as_flag_list()` also accepts a bare string as a one-element list — existing callers keep working, and a model that passes a scalar where a list is wanted lands correctly instead of tripping a pydantic schema error. Empty list raises; order preserved, duplicates collapsed. The replaces-not-narrows semantics are now documented at the call site, and called out again on the rebuild path where it bites hardest: a rebuild with `state=['open']` discards reopened findings *and* the old table is already gone. | navi-mcp | **Applied** |
+
+### Regression coverage added
+- `server/tests/test_enrich_tag_xrefs.py` — 33 checks: flag spelling, the xid
+  guard on both paths, every regexp-capable and regexp-incapable selector,
+  single `-regexp` emission, the deprecation alias, and the pre-existing
+  add-then-remove warning.
+- `server/tests/test_explore_regexp.py` — 27 checks: `-regexp` on all four
+  supported subcommands, rejection on the nine that ignore it, `--out` on
+  `plugin`, the xid literal-LIKE warning, and the bare-call regressions.
+- `server/tests/test_config_update.py` — 34 checks over the `config update`
+  scoping surface, including state/severity list arity.
+- `server/tests/test_config_rebuild.py` — 35 checks: argv and flag ordering,
+  the answered stdin prompt (and that the safe path leaves stdin closed), both
+  gates, the per-tool destructive annotations, inherited validation, the stale
+  derived-table notice, and abort propagation.
+
+140 checks, all green.
+
+### Method note for the next sweep
+Grepping for a flag name finds where it is *used*; AST-walking the click
+decorators finds where it is *declared*, which is what you need to prove a
+surface is fully covered. The script that produced the six-command list walks
+every `FunctionDef` carrying a `@*.command`/`@*.group` decorator and collects
+its `@click.option`/`@click.argument` string literals. Worth re-running against
+each new navi release — the same one-liner will flag any newly added flag that
+navi-mcp does not pass through.

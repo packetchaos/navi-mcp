@@ -434,9 +434,9 @@ def _require_remote_code_execution(tool_name: str) -> None:
         )
 
 
-def _newest_csv_after(mtime_floor: float) -> Path | None:
-    """Find the newest .csv in NAVI_WORKDIR modified after mtime_floor."""
-    candidates = [p for p in NAVI_WORKDIR.glob("*.csv") if p.stat().st_mtime > mtime_floor]
+def _newest_csv_after(mtime_floor: float, suffix: str = "*.csv") -> Path | None:
+    """Find the newest file matching `suffix` in NAVI_WORKDIR after mtime_floor."""
+    candidates = [p for p in NAVI_WORKDIR.glob(suffix) if p.stat().st_mtime > mtime_floor]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -1652,7 +1652,7 @@ async def navi_enrich_add(
 ExportSub = Literal[
     "assets", "bytag", "network", "licensed", "vulns",
     "failures", "route", "compliance", "agents", "group",
-    "users", "policy", "parsed", "compare", "query",
+    "users", "policy", "parsed", "query",
 ]
 
 
@@ -1670,19 +1670,26 @@ async def navi_export(
     network: str | None = None,
     route_id: str | None = None,
     group_name: str | None = None,
+    policy_id: str | None = None,
     sql: str | None = None,
+    file: str | None = None,
 ) -> dict:
     """
     Run a `navi export *` subcommand. Writes a CSV to NAVI_WORKDIR and returns
     the path + row count so Claude can surface it.
 
     Subcommand -> required params:
-      assets/licensed/vulns/failures/compliance/agents/users/policy/parsed/compare — none
+      assets/licensed/vulns/failures/compliance/agents/users/parsed — none
       bytag       category + value   (ONLY export with ACR + AES)
-      network     network
+      network     network            (the network UUID, not its display name)
       route       route_id
       group       group_name
+      policy      policy_id
       query       sql                (custom SELECT — no ACR/AES; use bytag)
+
+    `file` is optional on every subcommand and sets the output file name (the
+    extension is optional — navi adds it). Supplying it makes the returned path
+    deterministic instead of relying on newest-file detection.
 
     Response: csv_path, csv_bytes, csv_rows, csv_header, csv_preview (up to 5
     rows — a PREVIEW, not the full export). For analysis, prefer
@@ -1692,7 +1699,8 @@ async def navi_export(
     out, start the export and poll with navi_explore_api(url=
     "/vulns/export/<UUID>/status") until FINISHED, or run the export at the CLI.
     """
-    mtime_floor = max((p.stat().st_mtime for p in NAVI_WORKDIR.glob("*.csv")), default=0.0)
+    out_glob = "*.nessus" if subcommand == "policy" else "*.csv"
+    mtime_floor = max((p.stat().st_mtime for p in NAVI_WORKDIR.glob(out_glob)), default=0.0)
 
     if subcommand == "assets":
         args = ["export", "assets"]
@@ -1703,7 +1711,7 @@ async def navi_export(
     elif subcommand == "network":
         if not network:
             raise NaviError("subcommand='network' requires `network`.")
-        args = ["export", "network", "--network", network]
+        args = ["export", "network", network]  # positional NETWORK_UUID
     elif subcommand == "licensed":
         args = ["export", "licensed"]
     elif subcommand == "vulns":
@@ -1713,7 +1721,7 @@ async def navi_export(
     elif subcommand == "route":
         if not route_id:
             raise NaviError("subcommand='route' requires `route_id`.")
-        args = ["export", "route", "--route", route_id]
+        args = ["export", "route", route_id]  # positional ROUTE_ID
     elif subcommand == "compliance":
         args = ["export", "compliance"]
     elif subcommand == "agents":
@@ -1721,15 +1729,16 @@ async def navi_export(
     elif subcommand == "group":
         if not group_name:
             raise NaviError("subcommand='group' requires `group_name`.")
-        args = ["export", "group", "--name", group_name]
+        args = ["export", "group", group_name]  # positional GROUP_NAME
     elif subcommand == "users":
         args = ["export", "users"]
     elif subcommand == "policy":
-        args = ["export", "policy"]
+        if not policy_id:
+            raise NaviError("subcommand='policy' requires `policy_id`. "
+                            "List IDs with navi_explore_info(subcommand='policies').")
+        args = ["export", "policy", "--pid", policy_id]
     elif subcommand == "parsed":
         args = ["export", "parsed"]
-    elif subcommand == "compare":
-        args = ["export", "compare"]
     elif subcommand == "query":
         if not sql:
             raise NaviError("subcommand='query' requires `sql`.")
@@ -1737,18 +1746,31 @@ async def navi_export(
     else:
         raise NaviError(f"Unknown subcommand '{subcommand}'.")
 
+    if file:
+        args.extend(["--file", file])
+
     cli_hint = f"navi {' '.join(shlex.quote(a) for a in args)}"
     result = _raise_on_error(await run_navi(args, cli_hint=cli_hint), f"navi export {subcommand}")
 
-    csv = _newest_csv_after(mtime_floor)
+    csv = _newest_csv_after(mtime_floor, out_glob)
     if csv is None:
         raise NaviError(
-            f"navi export {subcommand} returned success but no new CSV appeared in "
-            f"{NAVI_WORKDIR}. stdout tail: {result['stdout'][-500:] or '(empty)'}"
+            f"navi export {subcommand} returned success but no new "
+            f"{out_glob.lstrip('*')} file appeared in {NAVI_WORKDIR}. "
+            f"stdout tail: {result['stdout'][-500:] or '(empty)'}"
         )
 
     result["csv_path"] = str(csv)
     result["csv_bytes"] = csv.stat().st_size
+
+    if subcommand == "policy":
+        # A .nessus policy blob is XML, not tabular -- no header/preview.
+        result["_notice"] = (
+            f"Policy {policy_id} exported to {csv} ({result['csv_bytes']} bytes). "
+            f"This is a .nessus XML policy file, not a CSV."
+        )
+        return result
+
     try:
         with csv.open("r", encoding="utf-8", errors="replace") as f:
             header = f.readline().rstrip("\n")
